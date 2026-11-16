@@ -1,17 +1,17 @@
-// JPEG の劣化のフィルターの 1 フレームあたりの GPU 時間を、1920x1080 で測るベンチマーク。
+// 劣化のフィルターの 1 フレームあたりの GPU 時間を、1920x1080 で測るベンチマーク。
 // 計測は gs_timer (タイムスタンプのクエリ) で行う。フィルターなしで同じソースを描く時間を基準とし、その差をフィルターの時間とする。
-// GPU 時間は保存し直しの回数で決まり、品質には依存しない。回数ごとに測るには、回数が変わるガビガビ度を渡す。
+// GPU 時間は処理の解像度で決まり、品質には依存しない。解像度ごとに測るには、解像度が変わるガビガビ度を渡す。
 // 使い方: benchmark <プラグイン> <プラグインの data> <描画モジュール> <libobs の data> <ガビガビ度>...
 // 環境で値が変わるため CTest には登録しない。
 
-#include "jpeg-crunch-fixture.hpp"
-#include "../src/jpeg-crunch-params.h"
+#include "image-degradation-fixture.hpp"
+#include "../src/image-degradation-params.h"
 
 #include <iomanip>
 
 namespace {
 
-using namespace jpeg_crunch_test;
+using namespace image_degradation_test;
 
 constexpr uint32_t kWidth = 1920;
 constexpr uint32_t kHeight = 1080;
@@ -122,13 +122,13 @@ int main(int argc, char **argv)
 
 	int exit_code = 0;
 	std::cout << std::fixed << std::setprecision(3);
-	std::cout << "crunch,quality,passes,width,height,frame_ms,baseline_ms,filter_ms\n";
+	std::cout << "crunch,quant_scale,scale,width,height,frame_ms,baseline_ms,filter_ms\n";
 	for (int i = 5; i < argc; ++i) {
 		const int crunch = std::atoi(argv[i]);
-		const jpeg_crunch::Settings settings = jpeg_crunch::settings_for(crunch);
+		const image_degradation::Settings settings = image_degradation::settings_for(crunch);
 		obs_source_t *source = create_test_source(spec, "filtered");
 		obs_data_t *data = crunch_settings(crunch);
-		obs_source_t *filter = obs_source_create(kFilterId, "jpeg-crunch", data, nullptr);
+		obs_source_t *filter = obs_source_create(kFilterId, "image-degradation", data, nullptr);
 		obs_data_release(data);
 		double frame = -1.0;
 		if (source && filter) {
@@ -136,7 +136,7 @@ int main(int argc, char **argv)
 			wait_frames(2);
 			frame = median_of_repeats(source);
 		}
-		std::cout << crunch << ',' << settings.quality << ',' << settings.passes << ',' << kWidth << ','
+		std::cout << crunch << ',' << settings.quant_scale << ',' << settings.scale << ',' << kWidth << ','
 			  << kHeight << ',' << frame << ',' << baseline << ',' << (frame - baseline) << '\n';
 		// 1920x1080 を 60 フレーム描いて 0 になることはない。0 以下はタイムスタンプが取れなかったことを示す
 		if (frame <= 0.0) {

@@ -1,8 +1,8 @@
-// JPEG で何度も保存し直したように映像を劣化させる映像フィルター。
-// ガビガビ度 (0-100) を、処理の解像度・JPEG の品質・量子化の倍率・保存し直しの回数へ写す。YCbCr への変換・8x8 の DCT・
-// 量子化・逆 DCT を近似して GPU のパスで繰り返す。回ごとに 8x8 の格子をずらし、同じ格子で繰り返したときの劣化の頭打ちを避ける。
+// ネットで転載を重ねた画像のように映像を劣化させる映像フィルター。
+// ガビガビ度 (0-100) を、処理の解像度・JPEG の品質・色のずれ・シャープ・彩度・コントラストへ写す。
+// 縮小、JPEG の圧縮の近似、色の加工、補間による拡大を GPU のパスで行う。
 
-#include "jpeg-crunch-params.h"
+#include "image-degradation-params.h"
 
 #include <obs-module.h>
 #include <plugin-support.h>
@@ -13,9 +13,9 @@
 
 namespace {
 
-constexpr const char *kCrunch = "crunch";
+constexpr const char *kCrunch = "degradation";
 
-// エフェクトのパラメーター。名前は jpeg-crunch.effect の uniform と一致させる
+// エフェクトのパラメーター。名前は image-degradation.effect の uniform と一致させる
 enum Param {
 	kParamImage,
 	kParamWork,
@@ -26,25 +26,31 @@ enum Param {
 	kParamWorkSize,
 	kParamTargetSize,
 	kParamScale,
-	kParamShift,
+	kParamSaturation,
+	kParamContrast,
+	kParamSharpen,
+	kParamColorShift,
+	kParamLinearInput,
 	kParamCount,
 };
 
 constexpr std::array<const char *, kParamCount> kParamNames = {
-	"image", "work", "coef", "basis", "qtable", "image_size", "work_size", "target_size", "scale", "shift",
+	"image",       "work",  "coef",       "basis",    "qtable",  "image_size",  "work_size",
+	"target_size", "scale", "saturation", "contrast", "sharpen", "color_shift", "linear_input",
 };
 
-constexpr std::array<const char *, 6> kTechniques = {"Capture", "RowDCT", "ColQuant", "ColIDCT", "Compose", "Output"};
+constexpr std::array<const char *, 7> kTechniques = {"Capture", "RowDCT", "ColQuant", "ColIDCT",
+						     "Compose", "Post",   "Output"};
 
 // フィルターが受け付ける色空間。sharpness-filter.c と同じく、HDR の 709_EXTENDED では処理を飛ばす
 constexpr std::array<gs_color_space, 3> kSpaces = {GS_CS_SRGB, GS_CS_SRGB_16F, GS_CS_709_EXTENDED};
 
-class JpegCrunchFilter {
+class ImageDegradationFilter {
 public:
-	JpegCrunchFilter(obs_data_t *settings, obs_source_t *context) : context_(context)
+	ImageDegradationFilter(obs_data_t *settings, obs_source_t *context) : context_(context)
 	{
 		obs_enter_graphics();
-		char *path = obs_module_file("effects/jpeg-crunch.effect");
+		char *path = obs_module_file("effects/image-degradation.effect");
 		if (path) {
 			effect_ = gs_effect_create_from_file(path, nullptr);
 			bfree(path);
@@ -63,7 +69,7 @@ public:
 		coef_[1] = gs_texrender_create(GS_RGBA32F, GS_ZS_NONE);
 		// DCT の基底を、8 値を 2 回の読み込みで得られる 4 x 8 の RGBA に並べる。
 		// (0, u) と (1, u) に順変換の B(u, 0..7)、(2, x) と (3, x) に逆変換の B(0..7, x) を置く
-		const std::array<float, 64> basis = jpeg_crunch::dct_basis();
+		const std::array<float, 64> basis = image_degradation::dct_basis();
 		std::array<float, 128> layout{};
 		for (int row = 0; row < 8; ++row) {
 			for (int k = 0; k < 8; ++k) {
@@ -75,12 +81,12 @@ public:
 		basis_ = gs_texture_create(4, 8, GS_RGBA32F, 1, &basis_data, 0);
 		obs_leave_graphics();
 		if (!Ready()) {
-			obs_log(LOG_ERROR, "[jpeg-crunch] failed to load effects/jpeg-crunch.effect");
+			obs_log(LOG_ERROR, "[image-degradation] failed to load effects/image-degradation.effect");
 		}
 		Update(settings);
 	}
 
-	~JpegCrunchFilter()
+	~ImageDegradationFilter()
 	{
 		obs_enter_graphics();
 		gs_texture_destroy(qtable_);
@@ -96,8 +102,8 @@ public:
 	void Update(obs_data_t *settings)
 	{
 		const auto crunch = static_cast<int>(obs_data_get_int(settings, kCrunch));
-		const jpeg_crunch::Settings next = jpeg_crunch::settings_for(crunch);
-		if (next.quality != settings_.quality || next.multiplier != settings_.multiplier) {
+		const image_degradation::Settings next = image_degradation::settings_for(crunch);
+		if (next.quant_scale != settings_.quant_scale) {
 			qtable_dirty_ = true;
 		}
 		settings_ = next;
@@ -106,7 +112,7 @@ public:
 	void Render()
 	{
 		obs_source_t *target = obs_filter_get_target(context_);
-		if (!Ready() || !target || settings_.passes == 0) {
+		if (!Ready() || !target || settings_.quant_scale == 0.0f) {
 			obs_source_skip_video_filter(context_);
 			return;
 		}
@@ -124,20 +130,21 @@ public:
 		}
 
 		const int scale = settings_.scale;
-		const auto work_w = static_cast<uint32_t>(jpeg_crunch::scaled_size(static_cast<int>(width), scale));
-		const auto work_h = static_cast<uint32_t>(jpeg_crunch::scaled_size(static_cast<int>(height), scale));
-		const auto coef_w = static_cast<uint32_t>(jpeg_crunch::padded_size(static_cast<int>(work_w)));
-		const auto coef_h = static_cast<uint32_t>(jpeg_crunch::padded_size(static_cast<int>(work_h)));
+		const auto work_w =
+			static_cast<uint32_t>(image_degradation::scaled_size(static_cast<int>(width), scale));
+		const auto work_h =
+			static_cast<uint32_t>(image_degradation::scaled_size(static_cast<int>(height), scale));
+		const auto coef_w = static_cast<uint32_t>(image_degradation::padded_size(static_cast<int>(work_w)));
+		const auto coef_h = static_cast<uint32_t>(image_degradation::padded_size(static_cast<int>(work_h)));
 
 		// gs_technique_end はパスのたびにパラメーターの値を消すため、パスの直前に毎回すべて設定する
 		struct Inputs {
 			gs_texture_t *work = nullptr;
 			gs_texture_t *coef = nullptr;
-			float shift = 0.0f;
 		};
 		const auto set_params = [&](const Inputs &in, uint32_t cx, uint32_t cy) {
-			// 対象の色はアルファを掛けた線形の値で読む。8 ビットの対象は sRGB の符号化を解いて読み、16 ビットの対象はそのまま読む
-			gs_effect_set_texture_srgb(params_[kParamImage], source);
+			// 対象の色はアルファを掛けた値。8 ビットの対象は sRGB で符号化したまま、16 ビットの対象は線形の値で読む
+			gs_effect_set_texture(params_[kParamImage], source);
 			gs_effect_set_texture(params_[kParamWork], in.work);
 			gs_effect_set_texture(params_[kParamCoef], in.coef);
 			gs_effect_set_texture(params_[kParamBasis], basis_);
@@ -150,7 +157,11 @@ public:
 			vec2_set(&size, static_cast<float>(cx), static_cast<float>(cy));
 			gs_effect_set_vec2(params_[kParamTargetSize], &size);
 			gs_effect_set_float(params_[kParamScale], static_cast<float>(scale));
-			gs_effect_set_float(params_[kParamShift], in.shift);
+			gs_effect_set_float(params_[kParamSaturation], settings_.saturation);
+			gs_effect_set_float(params_[kParamContrast], settings_.contrast);
+			gs_effect_set_float(params_[kParamSharpen], settings_.sharpen);
+			gs_effect_set_float(params_[kParamColorShift], static_cast<float>(settings_.color_shift));
+			gs_effect_set_float(params_[kParamLinearInput], space == GS_CS_SRGB_16F ? 1.0f : 0.0f);
 		};
 		const auto pass = [&](gs_texrender_t *output, const char *technique, const Inputs &in, uint32_t cx,
 				      uint32_t cy) -> gs_texture_t * {
@@ -158,16 +169,13 @@ public:
 			return DrawPass(output, technique, cx, cy);
 		};
 
+		// 読み書きする texrender を分けるため、work と coef はそれぞれ 2 つを交互に使う
 		gs_texture_t *work = pass(work_[0], "Capture", {}, work_w, work_h);
-		for (int i = 0; work && i < settings_.passes; ++i) {
-			const auto shift = static_cast<float>(jpeg_crunch::kShifts[i]);
-			gs_texture_t *coef = pass(coef_[0], "RowDCT", {work, nullptr, shift}, coef_w, coef_h);
-			coef = coef ? pass(coef_[1], "ColQuant", {nullptr, coef, shift}, coef_w, coef_h) : nullptr;
-			coef = coef ? pass(coef_[0], "ColIDCT", {nullptr, coef, shift}, coef_w, coef_h) : nullptr;
-			// 読み書きする texrender を分けるため、回ごとに work の出力先を入れ替える
-			work = coef ? pass(work_[(i + 1) % 2], "Compose", {nullptr, coef, shift}, work_w, work_h)
-				    : nullptr;
-		}
+		gs_texture_t *coef = work ? pass(coef_[0], "RowDCT", {work, nullptr}, coef_w, coef_h) : nullptr;
+		coef = coef ? pass(coef_[1], "ColQuant", {nullptr, coef}, coef_w, coef_h) : nullptr;
+		coef = coef ? pass(coef_[0], "ColIDCT", {nullptr, coef}, coef_w, coef_h) : nullptr;
+		work = coef ? pass(work_[1], "Compose", {nullptr, coef}, work_w, work_h) : nullptr;
+		work = work ? pass(work_[0], "Post", {work, nullptr}, work_w, work_h) : nullptr;
 		if (!work) {
 			obs_source_skip_video_filter(context_);
 			return;
@@ -179,7 +187,7 @@ public:
 		gs_enable_framebuffer_srgb(true);
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
-		set_params({work, nullptr, 0.0f}, width, height);
+		set_params({work, nullptr}, width, height);
 		while (gs_effect_loop(effect_, "Output")) {
 			gs_draw_sprite(nullptr, 0, width, height);
 		}
@@ -189,39 +197,39 @@ public:
 
 	static gs_color_space ColorSpace(void *data, size_t, const gs_color_space *)
 	{
-		auto *filter = static_cast<JpegCrunchFilter *>(data);
+		auto *filter = static_cast<ImageDegradationFilter *>(data);
 		obs_source_t *target = obs_filter_get_target(filter->context_);
 		return target ? obs_source_get_color_space(target, kSpaces.size(), kSpaces.data()) : GS_CS_SRGB;
 	}
 
-	static const char *GetName(void *) { return obs_module_text("SimpleJpegCrunch"); }
+	static const char *GetName(void *) { return obs_module_text("ImageDegradation"); }
 
 	static void *Create(obs_data_t *settings, obs_source_t *context)
 	{
-		return new (std::nothrow) JpegCrunchFilter(settings, context);
+		return new (std::nothrow) ImageDegradationFilter(settings, context);
 	}
 
-	static void Destroy(void *data) { delete static_cast<JpegCrunchFilter *>(data); }
+	static void Destroy(void *data) { delete static_cast<ImageDegradationFilter *>(data); }
 
 	static void UpdateCallback(void *data, obs_data_t *settings)
 	{
-		static_cast<JpegCrunchFilter *>(data)->Update(settings);
+		static_cast<ImageDegradationFilter *>(data)->Update(settings);
 	}
 
 	static void Defaults(obs_data_t *settings)
 	{
-		obs_data_set_default_int(settings, kCrunch, jpeg_crunch::kDefaultCrunch);
+		obs_data_set_default_int(settings, kCrunch, image_degradation::kDefaultCrunch);
 	}
 
 	static obs_properties_t *Properties(void *)
 	{
 		obs_properties_t *props = obs_properties_create();
-		obs_properties_add_int_slider(props, kCrunch, obs_module_text("Crunch"), jpeg_crunch::kMinCrunch,
-					      jpeg_crunch::kMaxCrunch, 1);
+		obs_properties_add_int_slider(props, kCrunch, obs_module_text("Degradation"),
+					      image_degradation::kMinCrunch, image_degradation::kMaxCrunch, 1);
 		return props;
 	}
 
-	static void RenderCallback(void *data, gs_effect_t *) { static_cast<JpegCrunchFilter *>(data)->Render(); }
+	static void RenderCallback(void *data, gs_effect_t *) { static_cast<ImageDegradationFilter *>(data)->Render(); }
 
 private:
 	// 設定済みのパラメーターで technique を描き、output (cx x cy) に書く。途中の値を壊さないよう、混ぜずに上書きする
@@ -286,10 +294,9 @@ private:
 			return true;
 		}
 		std::array<float, 128> table{};
-		const auto luma =
-			jpeg_crunch::scaled_table(jpeg_crunch::kLumaTable, settings_.quality, settings_.multiplier);
+		const auto luma = image_degradation::scaled_table(image_degradation::kLumaTable, settings_.quant_scale);
 		const auto chroma =
-			jpeg_crunch::scaled_table(jpeg_crunch::kChromaTable, settings_.quality, settings_.multiplier);
+			image_degradation::scaled_table(image_degradation::kChromaTable, settings_.quant_scale);
 		std::copy(luma.begin(), luma.end(), table.begin());
 		std::copy(chroma.begin(), chroma.end(), table.begin() + 64);
 		const auto *data = reinterpret_cast<const uint8_t *>(table.data());
@@ -326,24 +333,24 @@ private:
 	gs_texture_t *basis_ = nullptr;
 	gs_texture_t *qtable_ = nullptr;
 	bool qtable_dirty_ = true;
-	jpeg_crunch::Settings settings_;
+	image_degradation::Settings settings_;
 };
 
 } // namespace
 
-void register_jpeg_crunch_filter(void)
+void register_image_degradation_filter(void)
 {
 	static obs_source_info info = {};
-	info.id = "simple_jpeg_crunch_filter";
+	info.id = "image_degradation_filter";
 	info.type = OBS_SOURCE_TYPE_FILTER;
 	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB;
-	info.get_name = JpegCrunchFilter::GetName;
-	info.create = JpegCrunchFilter::Create;
-	info.destroy = JpegCrunchFilter::Destroy;
-	info.update = JpegCrunchFilter::UpdateCallback;
-	info.get_defaults = JpegCrunchFilter::Defaults;
-	info.get_properties = JpegCrunchFilter::Properties;
-	info.video_render = JpegCrunchFilter::RenderCallback;
-	info.video_get_color_space = JpegCrunchFilter::ColorSpace;
+	info.get_name = ImageDegradationFilter::GetName;
+	info.create = ImageDegradationFilter::Create;
+	info.destroy = ImageDegradationFilter::Destroy;
+	info.update = ImageDegradationFilter::UpdateCallback;
+	info.get_defaults = ImageDegradationFilter::Defaults;
+	info.get_properties = ImageDegradationFilter::Properties;
+	info.video_render = ImageDegradationFilter::RenderCallback;
+	info.video_get_color_space = ImageDegradationFilter::ColorSpace;
 	obs_register_source(&info);
 }

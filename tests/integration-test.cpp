@@ -1,12 +1,12 @@
-// JPEG の劣化のフィルターの出力を画素で検査する統合テスト。
-// 出力を、同じ計算を CPU で行う参照 (jpeg-reference.hpp) と比べる。量子化の丸めの境目に近い値に依存する画素は、
+// 劣化のフィルターの出力を画素で検査する統合テスト。
+// 出力を、同じ計算を CPU で行う参照 (degradation-reference.hpp) と比べる。量子化の丸めの境目に近い値に依存する画素は、
 // 浮動小数点の僅かな誤差で GPU と CPU の結果が分かれうるため、比較から外す。外した画素の割合にも上限を置く。
 // 使い方: integration-test <プラグイン> <プラグインの data> <描画モジュール> <libobs の data> <シナリオ>
 // 終了コードは、合格が 0、検査の不合格が 1、起動の失敗が 2。
 // preview のシナリオは CTest に登録しない。ガビガビ度ごとの出力を書き出して、依頼者が見た目を確かめるために使う。
 
-#include "jpeg-crunch-fixture.hpp"
-#include "jpeg-reference.hpp"
+#include "image-degradation-fixture.hpp"
+#include "degradation-reference.hpp"
 
 #include <cstring>
 #include <iomanip>
@@ -14,13 +14,13 @@
 
 namespace {
 
-using namespace jpeg_crunch_test;
+using namespace image_degradation_test;
 
 constexpr uint32_t kCanvasWidth = 64;
 constexpr uint32_t kCanvasHeight = 48;
 // 余裕 (丸めの境目からの距離) がこれより小さい画素は比較から外す。
-// D3D11 と OpenGL の実機 (RTX 3060 Ti) では、余裕が 1e-5 以上の画素は max (8 回) を含めてすべて CPU 参照と一致した。
-// 1e-4 では余裕が 1e-4 未満の判定が格子のずらしで広がり、odd-size-chain の比較できる画素が下限の近くまで減る。
+// D3D11 と OpenGL の実機 (RTX 3060 Ti) と CI のソフトウェア描画で、余裕が 1e-5 以上の画素は CPU 参照と一致した。
+// 幅を広げると、比較から外れる画素が周りの画素へ伝播して増える。
 // 不一致が出たときは、出力の largest margin among mismatches を見て広げる
 constexpr float kTieEpsilon = 1e-5f;
 // 比較できる画素の割合の下限
@@ -61,8 +61,8 @@ void check_reference(Checker &c, const std::string &label, const Image &input, c
 	for (size_t i = 0, n = static_cast<size_t>(input.width) * input.height; i < n; ++i) {
 		std::copy_n(&input.rgba[i * 4], 3, &rgb[i * 3]);
 	}
-	const jpeg_reference::Result ref =
-		jpeg_reference::run(rgb, static_cast<int>(input.width), static_cast<int>(input.height), crunch);
+	const degradation_reference::Result ref =
+		degradation_reference::run(rgb, static_cast<int>(input.width), static_cast<int>(input.height), crunch);
 	size_t comparable = 0;
 	size_t mismatched = 0;
 	size_t changed = 0;
@@ -128,7 +128,7 @@ void with_filter(Checker &c, const SourceSpec &spec, int crunch, const FilterChe
 {
 	obs_source_t *source = create_test_source(spec);
 	obs_data_t *settings = crunch_settings(crunch);
-	obs_source_t *filter = obs_source_create(kFilterId, "jpeg-crunch", settings, nullptr);
+	obs_source_t *filter = obs_source_create(kFilterId, "image-degradation", settings, nullptr);
 	obs_data_release(settings);
 	if (!source || !filter) {
 		c.expect(false, "failed to create the test source or the filter");
@@ -167,11 +167,10 @@ double mean_abs_diff(const Image &a, const Image &b)
 }
 
 const SourceSpec scene = {kCanvasWidth, kCanvasHeight, paint_scene};
-// 等倍の解像度で 1 回の保存し直しになるガビガビ度、2 回になるガビガビ度 (解像度は 1/2)、
-// 1/2 と 1/4 の解像度になるガビガビ度
-constexpr int kSinglePass = 10;
-constexpr int kTwoPasses = 60;
-constexpr int kHalfScale = 70;
+// 解像度が等倍 (色のずれ 0、既定値)・1/2 (1 px)・1/3 (2 px)・1/4 (3 px) になるガビガビ度
+constexpr int kFullScale = 10;
+constexpr int kHalfScale = 30;
+constexpr int kThirdScale = 50;
 constexpr int kQuarterScale = 90;
 
 struct Scenario {
@@ -191,50 +190,47 @@ const Scenario scenarios[] = {
 			 }
 		 });
 	 }},
-	// 1 回の保存し直し。8x8 のブロックごとの DCT と量子化の結果が CPU 参照と一致する
+	// 等倍の解像度。8x8 のブロックごとの DCT と量子化、シャープ・彩度・コントラストの結果が CPU 参照と一致する
 	{"single",
 	 [](Checker &c) {
-		 reference_scenario(c, "single", scene, kSinglePass);
+		 reference_scenario(c, "single", scene, kFullScale);
 	 }},
-	// 2 回の保存し直し。回の連結と、2 回目の格子のずらしが CPU 参照と一致する
-	{"chain",
-	 [](Checker &c) {
-		 reference_scenario(c, "chain", scene, kTwoPasses);
-	 }},
-	// 処理の解像度を 1/2 と 1/4 に下げたときの縮小・保存し直し・最近傍での拡大が CPU 参照と一致する
+	// 処理の解像度を下げたときの縮小・色のずれ・双線形補間での拡大が CPU 参照と一致する
 	{"scaled",
 	 [](Checker &c) {
 		 reference_scenario(c, "scaled-half", scene, kHalfScale);
+		 reference_scenario(c, "scaled-third", scene, kThirdScale);
 		 reference_scenario(c, "scaled-quarter", scene, kQuarterScale);
 	 }},
-	// 最大のガビガビ度。回を重ねると丸めの境目の差が連鎖して広がるため、CPU 参照との比較は記録だけにし、
-	// アルファの保持と、入力から大きく変わったことを確かめる
+	// 最大のガビガビ度。CPU 参照との比較は記録だけにし、アルファの保持と、入力から大きく変わったことを確かめる
 	{"max",
 	 [](Checker &c) {
 		 const Image input = paint_image(scene);
-		 with_filter(c, scene, jpeg_crunch::kMaxCrunch, [&](Checker &c, obs_source_t *source, obs_source_t *) {
-			 Image out;
-			 if (!render_filtered(c, "max", source, out)) {
-				 return;
-			 }
-			 for (uint32_t y = 0; y < out.height; ++y) {
-				 for (uint32_t x = 0; x < out.width; ++x) {
-					 c.expect(out.at(x, y)[3] == 255, "alpha changed at " + at(x, y));
-				 }
-			 }
-			 const double diff = mean_abs_diff(input, out);
-			 std::cout << "max: mean absolute difference from the input " << diff << '\n';
-			 c.expect(diff > 2.0, "the output at the maximum is too close to the input");
-			 Checker record;
-			 check_reference(record, "max (recorded only)", input, out, jpeg_crunch::kMaxCrunch);
-		 });
+		 with_filter(c, scene, image_degradation::kMaxCrunch,
+			     [&](Checker &c, obs_source_t *source, obs_source_t *) {
+				     Image out;
+				     if (!render_filtered(c, "max", source, out)) {
+					     return;
+				     }
+				     for (uint32_t y = 0; y < out.height; ++y) {
+					     for (uint32_t x = 0; x < out.width; ++x) {
+						     c.expect(out.at(x, y)[3] == 255, "alpha changed at " + at(x, y));
+					     }
+				     }
+				     const double diff = mean_abs_diff(input, out);
+				     std::cout << "max: mean absolute difference from the input " << diff << '\n';
+				     c.expect(diff > 2.0, "the output at the maximum is too close to the input");
+				     Checker record;
+				     check_reference(record, "max (recorded only)", input, out,
+						     image_degradation::kMaxCrunch);
+			     });
 	 }},
 	// 半透明の入力でも、出力のアルファは入力のアルファのまま残る
 	{"alpha",
 	 [](Checker &c) {
 		 const SourceSpec spec = {kCanvasWidth, kCanvasHeight, paint_translucent};
 		 const Image input = paint_image(spec);
-		 with_filter(c, spec, jpeg_crunch::kDefaultCrunch,
+		 with_filter(c, spec, image_degradation::kDefaultCrunch,
 			     [&](Checker &c, obs_source_t *source, obs_source_t *) {
 				     Image out;
 				     if (!render_filtered(c, "alpha", source, out)) {
@@ -254,9 +250,9 @@ const Scenario scenarios[] = {
 	{"odd-size",
 	 [](Checker &c) {
 		 const SourceSpec spec = {61, 45, paint_scene};
-		 reference_scenario(c, "odd-size-single", spec, kSinglePass);
-		 reference_scenario(c, "odd-size-chain", spec, kTwoPasses);
-		 reference_scenario(c, "odd-size-quarter", spec, kQuarterScale);
+		 reference_scenario(c, "odd-size-single", spec, kFullScale);
+		 reference_scenario(c, "odd-size-half", spec, kHalfScale);
+		 reference_scenario(c, "odd-size-third", spec, kThirdScale);
 	 }},
 	// 16 ビットの線形の入力 (SRGB_16F) は、sRGB へ符号化してから処理し、線形へ戻して出力する。
 	// 同じ絵を 8 ビットの sRGB の入力で処理した出力とほぼ同じになる
@@ -266,10 +262,10 @@ const Scenario scenarios[] = {
 		 linear.space = GS_CS_SRGB_16F;
 		 Image from_srgb;
 		 Image from_linear;
-		 with_filter(c, scene, kTwoPasses, [&](Checker &c, obs_source_t *source, obs_source_t *) {
+		 with_filter(c, scene, kHalfScale, [&](Checker &c, obs_source_t *source, obs_source_t *) {
 			 render_filtered(c, "srgb16f-from-srgb", source, from_srgb);
 		 });
-		 with_filter(c, linear, kTwoPasses, [&](Checker &c, obs_source_t *source, obs_source_t *) {
+		 with_filter(c, linear, kHalfScale, [&](Checker &c, obs_source_t *source, obs_source_t *) {
 			 render_filtered(c, "srgb16f-from-linear", source, from_linear);
 		 });
 		 const double diff = mean_abs_diff(from_srgb, from_linear);
@@ -283,8 +279,8 @@ const Scenario scenarios[] = {
 		 SourceSpec spec = scene;
 		 spec.space = GS_CS_709_EXTENDED;
 		 obs_source_t *source = create_test_source(spec);
-		 obs_data_t *settings = crunch_settings(jpeg_crunch::kMaxCrunch);
-		 obs_source_t *filter = obs_source_create(kFilterId, "jpeg-crunch", settings, nullptr);
+		 obs_data_t *settings = crunch_settings(image_degradation::kMaxCrunch);
+		 obs_source_t *filter = obs_source_create(kFilterId, "image-degradation", settings, nullptr);
 		 obs_data_release(settings);
 		 Image before;
 		 Image after;
@@ -320,8 +316,8 @@ const Scenario scenarios[] = {
 			 obs_sceneitem_set_pos(overlay_item, &pos);
 		 }
 		 obs_source_t *scene_source = scene ? obs_scene_get_source(scene) : nullptr;
-		 obs_data_t *settings = crunch_settings(jpeg_crunch::kMaxCrunch);
-		 obs_source_t *filter = obs_source_create(kFilterId, "jpeg-crunch", settings, nullptr);
+		 obs_data_t *settings = crunch_settings(image_degradation::kMaxCrunch);
+		 obs_source_t *filter = obs_source_create(kFilterId, "image-degradation", settings, nullptr);
 		 obs_data_release(settings);
 		 Image before;
 		 if (!scene_source || !overlay_item || !filter) {
@@ -372,7 +368,7 @@ const Scenario scenarios[] = {
 			 if (render_filtered(c, "settings-update-0", source, out)) {
 				 check_identity(c, input, out);
 			 }
-			 for (const int crunch : {kSinglePass, 0}) {
+			 for (const int crunch : {kFullScale, 0}) {
 				 obs_data_t *next = crunch_settings(crunch);
 				 c.expect(update_and_wait(filter, next), "settings were not applied");
 				 obs_data_release(next);
@@ -388,12 +384,12 @@ const Scenario scenarios[] = {
 			 }
 		 });
 	 }},
-	// 目視の確認用。環境変数 JPEG_CRUNCH_TEST_INPUT に BMP があればそれを、無ければ合成した絵を入力にし、
-	// ガビガビ度ごとの出力を JPEG_CRUNCH_TEST_OUTPUT_DIR に書き出す
+	// 目視の確認用。環境変数 IMAGE_DEGRADATION_TEST_INPUT に BMP があればそれを、無ければ合成した絵を入力にし、
+	// ガビガビ度ごとの出力を IMAGE_DEGRADATION_TEST_OUTPUT_DIR に書き出す
 	{"preview",
 	 [](Checker &c) {
 		 SourceSpec spec = {640, 360, paint_scene};
-		 if (const char *path = std::getenv("JPEG_CRUNCH_TEST_INPUT")) {
+		 if (const char *path = std::getenv("IMAGE_DEGRADATION_TEST_INPUT")) {
 			 const Image photo = read_bmp(path);
 			 if (photo.rgba.empty()) {
 				 c.expect(false, std::string("failed to read ") + path);
@@ -403,7 +399,7 @@ const Scenario scenarios[] = {
 					 image = photo;
 				 }};
 		 }
-		 for (const int crunch : {0, 25, 50, 75, 100}) {
+		 for (const int crunch : {0, 10, 20, 30, 50, 70, 100}) {
 			 with_filter(c, spec, crunch, [&](Checker &c, obs_source_t *source, obs_source_t *) {
 				 std::ostringstream name;
 				 name << "preview-" << std::setw(3) << std::setfill('0') << crunch;

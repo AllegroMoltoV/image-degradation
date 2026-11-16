@@ -100,10 +100,10 @@ inline bool load_plugin(const char *plugin_path, const char *module_data)
 
 } // namespace obs_test
 
-namespace jpeg_crunch_test {
+namespace image_degradation_test {
 
-constexpr const char *kFilterId = "simple_jpeg_crunch_filter";
-constexpr const char *kTestSourceId = "simple_jpeg_crunch_test_source";
+constexpr const char *kFilterId = "image_degradation_filter";
+constexpr const char *kTestSourceId = "image_degradation_test_source";
 
 // RGBA の画素。出力の色はアルファを掛けた値、テスト用ソースに渡す色はアルファを掛けない値
 struct Image {
@@ -166,7 +166,7 @@ inline void register_test_source()
 	info.type = OBS_SOURCE_TYPE_INPUT;
 	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB;
 	info.get_name = [](void *) {
-		return "JPEG crunch test source";
+		return "Image degradation test source";
 	};
 	info.create = [](obs_data_t *, obs_source_t *) -> void * {
 		auto *source = new TestSource;
@@ -213,7 +213,7 @@ inline obs_source_t *create_test_source(const SourceSpec &spec, const char *name
 inline obs_data_t *crunch_settings(int crunch)
 {
 	obs_data_t *settings = obs_data_create();
-	obs_data_set_int(settings, "crunch", crunch);
+	obs_data_set_int(settings, "degradation", crunch);
 	return settings;
 }
 
@@ -466,10 +466,10 @@ inline bool write_bmp(const std::string &path, uint32_t width, uint32_t height, 
 	return static_cast<bool>(file);
 }
 
-// 環境変数 JPEG_CRUNCH_TEST_OUTPUT_DIR があるときだけ、目視の確認のために出力を白い背景に合成して書き出す
+// 環境変数 IMAGE_DEGRADATION_TEST_OUTPUT_DIR があるときだけ、目視の確認のために出力を白い背景に合成して書き出す
 inline void save_image(const std::string &name, const Image &image)
 {
-	const char *dir = std::getenv("JPEG_CRUNCH_TEST_OUTPUT_DIR");
+	const char *dir = std::getenv("IMAGE_DEGRADATION_TEST_OUTPUT_DIR");
 	if (!dir || image.rgba.empty()) {
 		return;
 	}
@@ -503,4 +503,4 @@ struct Checker {
 	}
 };
 
-} // namespace jpeg_crunch_test
+} // namespace image_degradation_test

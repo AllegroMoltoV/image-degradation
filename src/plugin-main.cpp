@@ -4,11 +4,11 @@
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
-void register_jpeg_crunch_filter(void);
+void register_image_degradation_filter(void);
 
 extern "C" bool obs_module_load(void)
 {
-	register_jpeg_crunch_filter();
+	register_image_degradation_filter();
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
 	return true;
 }

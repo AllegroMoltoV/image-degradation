@@ -149,13 +149,13 @@ def logo_split(crunched):
     defs = '<clipPath id="right"><rect x="256" width="256" height="512"/></clipPath>'
     body = (f'<g clip-path="url(#frame)">{crisp_landscape()}{cells_svg(crunched, clip="right")}'
             '<rect x="252" width="8" height="512" fill="#FFFFFF" opacity="0.85"/></g>')
-    return svg("Simple JPEG Crunch", "A landscape whose right half is broken into JPEG blocks.", body, defs)
+    return svg("Image Degradation", "A landscape whose right half is broken into JPEG blocks.", body, defs)
 
 
 def logo_full(crunched):
     """案 B: 風景の全体が JPEG で崩れている"""
     body = f'<g clip-path="url(#frame)">{cells_svg(crunched)}</g>'
-    return svg("Simple JPEG Crunch", "A landscape fully broken into JPEG blocks.", body)
+    return svg("Image Degradation", "A landscape fully broken into JPEG blocks.", body)
 
 
 def logo_file(crunched):
@@ -173,7 +173,7 @@ def logo_file(crunched):
         '<path d="M 96,40 L 336,40 L 416,120 L 416,472 L 96,472 Z" fill="none" stroke="#2B2B2B" '
         'stroke-width="12" stroke-linejoin="round"/>'
     )
-    return svg("Simple JPEG Crunch", "An image file icon whose picture is broken into JPEG blocks.", body, defs)
+    return svg("Image Degradation", "An image file icon whose picture is broken into JPEG blocks.", body, defs)
 
 
 def logo_stack(stages):
@@ -186,7 +186,7 @@ def logo_stack(stages):
         y = 56 + i * 52
         body += (f'<rect x="{x - 8}" y="{y - 8}" width="{size + 16}" height="{size + 16}" rx="10" fill="#FFFFFF"/>'
                  f'{cells_svg(image, x, y, cell)}')
-    return svg("Simple JPEG Crunch", "Three stacked pictures that get more broken toward the front.", body)
+    return svg("Image Degradation", "Three stacked pictures that get more broken toward the front.", body)
 
 
 def sheet(names):

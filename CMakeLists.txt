@@ -61,13 +61,13 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${PLUGIN_SOURCES} ${PLUGIN
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
 # 描画のテスト用の実行ファイル。Windows では常にビルドし、macOS と Linux では CI の描画検証 (render-test.yaml) で有効にする
-# - jpeg-crunch-integration-test: 出力画素を CPU で計算した参照と比べる統合テスト
-# - jpeg-crunch-benchmark: 1920x1080 の GPU 時間を測る。環境で値が変わるため CTest には登録しない
+# - image-degradation-integration-test: 出力画素を CPU で計算した参照と比べる統合テスト
+# - image-degradation-benchmark: 1920x1080 の GPU 時間を測る。環境で値が変わるため CTest には登録しない
 option(ENABLE_RENDER_TESTS "Build the render tests and benchmark on macOS and Linux" OFF)
 if(WIN32 OR ENABLE_RENDER_TESTS)
-  add_executable(jpeg-crunch-integration-test tests/integration-test.cpp)
-  add_executable(jpeg-crunch-benchmark tests/benchmark.cpp)
-  foreach(_test_target IN ITEMS jpeg-crunch-integration-test jpeg-crunch-benchmark)
+  add_executable(image-degradation-integration-test tests/integration-test.cpp)
+  add_executable(image-degradation-benchmark tests/benchmark.cpp)
+  foreach(_test_target IN ITEMS image-degradation-integration-test image-degradation-benchmark)
     target_compile_features(${_test_target} PRIVATE cxx_std_17)
     target_link_libraries(${_test_target} PRIVATE OBS::libobs)
     add_dependencies(${_test_target} ${CMAKE_PROJECT_NAME})
@@ -90,7 +90,6 @@ if(WIN32)
     _scenarios
     zero
     single
-    chain
     scaled
     max
     alpha
@@ -102,11 +101,11 @@ if(WIN32)
   )
   foreach(_backend IN ITEMS d3d11 opengl)
     foreach(_scenario IN LISTS _scenarios)
-      set(_test_name jpeg-crunch-${_backend}-${_scenario})
+      set(_test_name image-degradation-${_backend}-${_scenario})
       add_test(
         NAME ${_test_name}
         COMMAND
-          jpeg-crunch-integration-test "$<TARGET_FILE:${CMAKE_PROJECT_NAME}>" "${CMAKE_CURRENT_SOURCE_DIR}/data"
+          image-degradation-integration-test "$<TARGET_FILE:${CMAKE_PROJECT_NAME}>" "${CMAKE_CURRENT_SOURCE_DIR}/data"
           "${_graphics_${_backend}}" "${CMAKE_CURRENT_SOURCE_DIR}/.deps/obs-studio-31.1.1/libobs/data" ${_scenario}
       )
       set_tests_properties(
