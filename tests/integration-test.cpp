@@ -167,9 +167,12 @@ double mean_abs_diff(const Image &a, const Image &b)
 }
 
 const SourceSpec scene = {kCanvasWidth, kCanvasHeight, paint_scene};
-// 1 回の保存し直しになるガビガビ度と、2 回になるガビガビ度
+// 等倍の解像度で 1 回の保存し直しになるガビガビ度、2 回になるガビガビ度 (解像度は 1/2)、
+// 1/2 と 1/4 の解像度になるガビガビ度
 constexpr int kSinglePass = 10;
-constexpr int kTwoPasses = 20;
+constexpr int kTwoPasses = 60;
+constexpr int kHalfScale = 70;
+constexpr int kQuarterScale = 90;
 
 struct Scenario {
 	const char *name;
@@ -197,6 +200,12 @@ const Scenario scenarios[] = {
 	{"chain",
 	 [](Checker &c) {
 		 reference_scenario(c, "chain", scene, kTwoPasses);
+	 }},
+	// 処理の解像度を 1/2 と 1/4 に下げたときの縮小・保存し直し・最近傍での拡大が CPU 参照と一致する
+	{"scaled",
+	 [](Checker &c) {
+		 reference_scenario(c, "scaled-half", scene, kHalfScale);
+		 reference_scenario(c, "scaled-quarter", scene, kQuarterScale);
 	 }},
 	// 最大のガビガビ度。回を重ねると丸めの境目の差が連鎖して広がるため、CPU 参照との比較は記録だけにし、
 	// アルファの保持と、入力から大きく変わったことを確かめる
@@ -247,6 +256,7 @@ const Scenario scenarios[] = {
 		 const SourceSpec spec = {61, 45, paint_scene};
 		 reference_scenario(c, "odd-size-single", spec, kSinglePass);
 		 reference_scenario(c, "odd-size-chain", spec, kTwoPasses);
+		 reference_scenario(c, "odd-size-quarter", spec, kQuarterScale);
 	 }},
 	// 16 ビットの線形の入力 (SRGB_16F) は、sRGB へ符号化してから処理し、線形へ戻して出力する。
 	// 同じ絵を 8 ビットの sRGB の入力で処理した出力とほぼ同じになる

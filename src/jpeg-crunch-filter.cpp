@@ -1,6 +1,6 @@
 // JPEG で何度も保存し直したように映像を劣化させる映像フィルター。
-// ガビガビ度 (0-100) を JPEG の品質と保存し直しの回数へ写し、YCbCr への変換・色差の間引き・8x8 の DCT・量子化・逆 DCT を
-// GPU のパスで繰り返す。回ごとに 8x8 の格子をずらし、同じ格子で繰り返したときの劣化の頭打ちを避ける。
+// ガビガビ度 (0-100) を、処理の解像度・JPEG の品質・量子化の倍率・保存し直しの回数へ写す。YCbCr への変換・8x8 の DCT・
+// 量子化・逆 DCT を近似して GPU のパスで繰り返す。回ごとに 8x8 の格子をずらし、同じ格子で繰り返したときの劣化の頭打ちを避ける。
 
 #include "jpeg-crunch-params.h"
 
@@ -19,25 +19,22 @@ constexpr const char *kCrunch = "crunch";
 enum Param {
 	kParamImage,
 	kParamWork,
-	kParamLuma,
-	kParamChroma,
+	kParamCoef,
 	kParamBasis,
 	kParamQtable,
 	kParamImageSize,
-	kParamChromaSize,
+	kParamWorkSize,
 	kParamTargetSize,
+	kParamScale,
 	kParamShift,
 	kParamCount,
 };
 
 constexpr std::array<const char *, kParamCount> kParamNames = {
-	"image", "work", "luma", "chroma", "basis", "qtable", "image_size", "chroma_size", "target_size", "shift",
+	"image", "work", "coef", "basis", "qtable", "image_size", "work_size", "target_size", "scale", "shift",
 };
 
-constexpr std::array<const char *, 9> kTechniques = {
-	"Capture",     "LumaRow",      "LumaQuant", "LumaInvCol", "ChromaRow",
-	"ChromaQuant", "ChromaInvCol", "Compose",   "Output",
-};
+constexpr std::array<const char *, 6> kTechniques = {"Capture", "RowDCT", "ColQuant", "ColIDCT", "Compose", "Output"};
 
 // フィルターが受け付ける色空間。sharpness-filter.c と同じく、HDR の 709_EXTENDED では処理を飛ばす
 constexpr std::array<gs_color_space, 3> kSpaces = {GS_CS_SRGB, GS_CS_SRGB_16F, GS_CS_709_EXTENDED};
@@ -60,14 +57,22 @@ public:
 		// 符号化した RGB は 0-255 の整数のため、16 ビットの浮動小数点で誤差なく持てる
 		work_[0] = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
 		work_[1] = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
-		// DCT の途中の値は数百に達し、16 ビットの浮動小数点では刻みが量子化の丸めを狂わせるため 32 ビットで持つ
-		luma_[0] = gs_texrender_create(GS_R32F, GS_ZS_NONE);
-		luma_[1] = gs_texrender_create(GS_R32F, GS_ZS_NONE);
-		chroma_[0] = gs_texrender_create(GS_RG32F, GS_ZS_NONE);
-		chroma_[1] = gs_texrender_create(GS_RG32F, GS_ZS_NONE);
+		// DCT の途中の値は数百に達し、16 ビットの浮動小数点では刻みが量子化の丸めを狂わせるため 32 ビットで持つ。
+		// Y・Cb・Cr を 1 枚にまとめ、パスの数を減らす
+		coef_[0] = gs_texrender_create(GS_RGBA32F, GS_ZS_NONE);
+		coef_[1] = gs_texrender_create(GS_RGBA32F, GS_ZS_NONE);
+		// DCT の基底を、8 値を 2 回の読み込みで得られる 4 x 8 の RGBA に並べる。
+		// (0, u) と (1, u) に順変換の B(u, 0..7)、(2, x) と (3, x) に逆変換の B(0..7, x) を置く
 		const std::array<float, 64> basis = jpeg_crunch::dct_basis();
-		const auto *basis_data = reinterpret_cast<const uint8_t *>(basis.data());
-		basis_ = gs_texture_create(8, 8, GS_R32F, 1, &basis_data, 0);
+		std::array<float, 128> layout{};
+		for (int row = 0; row < 8; ++row) {
+			for (int k = 0; k < 8; ++k) {
+				layout[size_t(row) * 16 + size_t(k)] = basis[size_t(row) * 8 + size_t(k)];
+				layout[size_t(row) * 16 + 8 + size_t(k)] = basis[size_t(k) * 8 + size_t(row)];
+			}
+		}
+		const auto *basis_data = reinterpret_cast<const uint8_t *>(layout.data());
+		basis_ = gs_texture_create(4, 8, GS_RGBA32F, 1, &basis_data, 0);
 		obs_leave_graphics();
 		if (!Ready()) {
 			obs_log(LOG_ERROR, "[jpeg-crunch] failed to load effects/jpeg-crunch.effect");
@@ -80,8 +85,7 @@ public:
 		obs_enter_graphics();
 		gs_texture_destroy(qtable_);
 		gs_texture_destroy(basis_);
-		for (gs_texrender_t *render :
-		     {work_[0], work_[1], luma_[0], luma_[1], chroma_[0], chroma_[1], source_}) {
+		for (gs_texrender_t *render : {work_[0], work_[1], coef_[0], coef_[1], source_}) {
 			gs_texrender_destroy(render);
 		}
 		gs_effect_destroy(effect_);
@@ -93,7 +97,7 @@ public:
 	{
 		const auto crunch = static_cast<int>(obs_data_get_int(settings, kCrunch));
 		const jpeg_crunch::Settings next = jpeg_crunch::settings_for(crunch);
-		if (next.quality != settings_.quality) {
+		if (next.quality != settings_.quality || next.multiplier != settings_.multiplier) {
 			qtable_dirty_ = true;
 		}
 		settings_ = next;
@@ -119,37 +123,33 @@ public:
 			return;
 		}
 
-		const auto w = static_cast<float>(width);
-		const auto h = static_cast<float>(height);
-		const uint32_t chroma_w = (width + 1) / 2;
-		const uint32_t chroma_h = (height + 1) / 2;
-		const auto luma_pw = static_cast<uint32_t>(jpeg_crunch::padded_size(static_cast<int>(width)));
-		const auto luma_ph = static_cast<uint32_t>(jpeg_crunch::padded_size(static_cast<int>(height)));
-		const auto chroma_pw = static_cast<uint32_t>(jpeg_crunch::padded_size(static_cast<int>(chroma_w)));
-		const auto chroma_ph = static_cast<uint32_t>(jpeg_crunch::padded_size(static_cast<int>(chroma_h)));
+		const int scale = settings_.scale;
+		const auto work_w = static_cast<uint32_t>(jpeg_crunch::scaled_size(static_cast<int>(width), scale));
+		const auto work_h = static_cast<uint32_t>(jpeg_crunch::scaled_size(static_cast<int>(height), scale));
+		const auto coef_w = static_cast<uint32_t>(jpeg_crunch::padded_size(static_cast<int>(work_w)));
+		const auto coef_h = static_cast<uint32_t>(jpeg_crunch::padded_size(static_cast<int>(work_h)));
 
 		// gs_technique_end はパスのたびにパラメーターの値を消すため、パスの直前に毎回すべて設定する
 		struct Inputs {
 			gs_texture_t *work = nullptr;
-			gs_texture_t *luma = nullptr;
-			gs_texture_t *chroma = nullptr;
+			gs_texture_t *coef = nullptr;
 			float shift = 0.0f;
 		};
 		const auto set_params = [&](const Inputs &in, uint32_t cx, uint32_t cy) {
 			// 対象の色はアルファを掛けた線形の値で読む。8 ビットの対象は sRGB の符号化を解いて読み、16 ビットの対象はそのまま読む
 			gs_effect_set_texture_srgb(params_[kParamImage], source);
 			gs_effect_set_texture(params_[kParamWork], in.work);
-			gs_effect_set_texture(params_[kParamLuma], in.luma);
-			gs_effect_set_texture(params_[kParamChroma], in.chroma);
+			gs_effect_set_texture(params_[kParamCoef], in.coef);
 			gs_effect_set_texture(params_[kParamBasis], basis_);
 			gs_effect_set_texture(params_[kParamQtable], qtable_);
 			vec2 size;
-			vec2_set(&size, w, h);
+			vec2_set(&size, static_cast<float>(width), static_cast<float>(height));
 			gs_effect_set_vec2(params_[kParamImageSize], &size);
-			vec2_set(&size, static_cast<float>(chroma_w), static_cast<float>(chroma_h));
-			gs_effect_set_vec2(params_[kParamChromaSize], &size);
+			vec2_set(&size, static_cast<float>(work_w), static_cast<float>(work_h));
+			gs_effect_set_vec2(params_[kParamWorkSize], &size);
 			vec2_set(&size, static_cast<float>(cx), static_cast<float>(cy));
 			gs_effect_set_vec2(params_[kParamTargetSize], &size);
+			gs_effect_set_float(params_[kParamScale], static_cast<float>(scale));
 			gs_effect_set_float(params_[kParamShift], in.shift);
 		};
 		const auto pass = [&](gs_texrender_t *output, const char *technique, const Inputs &in, uint32_t cx,
@@ -158,27 +158,15 @@ public:
 			return DrawPass(output, technique, cx, cy);
 		};
 
-		gs_texture_t *work = pass(work_[0], "Capture", {}, width, height);
+		gs_texture_t *work = pass(work_[0], "Capture", {}, work_w, work_h);
 		for (int i = 0; work && i < settings_.passes; ++i) {
 			const auto shift = static_cast<float>(jpeg_crunch::kShifts[i]);
-			gs_texture_t *luma =
-				pass(luma_[0], "LumaRow", {work, nullptr, nullptr, shift}, luma_pw, luma_ph);
-			luma = luma ? pass(luma_[1], "LumaQuant", {work, luma, nullptr, shift}, luma_pw, luma_ph)
+			gs_texture_t *coef = pass(coef_[0], "RowDCT", {work, nullptr, shift}, coef_w, coef_h);
+			coef = coef ? pass(coef_[1], "ColQuant", {nullptr, coef, shift}, coef_w, coef_h) : nullptr;
+			coef = coef ? pass(coef_[0], "ColIDCT", {nullptr, coef, shift}, coef_w, coef_h) : nullptr;
+			// 読み書きする texrender を分けるため、回ごとに work の出力先を入れ替える
+			work = coef ? pass(work_[(i + 1) % 2], "Compose", {nullptr, coef, shift}, work_w, work_h)
 				    : nullptr;
-			luma = luma ? pass(luma_[0], "LumaInvCol", {work, luma, nullptr, shift}, luma_pw, luma_ph)
-				    : nullptr;
-			gs_texture_t *chroma =
-				pass(chroma_[0], "ChromaRow", {work, nullptr, nullptr, shift}, chroma_pw, chroma_ph);
-			chroma = chroma ? pass(chroma_[1], "ChromaQuant", {work, nullptr, chroma, shift}, chroma_pw,
-					       chroma_ph)
-					: nullptr;
-			chroma = chroma ? pass(chroma_[0], "ChromaInvCol", {work, nullptr, chroma, shift}, chroma_pw,
-					       chroma_ph)
-					: nullptr;
-			// Compose は work を読まないが、読み書きする texrender を分けるため、回ごとに出力先を入れ替える
-			work = luma && chroma ? pass(work_[(i + 1) % 2], "Compose", {nullptr, luma, chroma, shift},
-						     width, height)
-					      : nullptr;
 		}
 		if (!work) {
 			obs_source_skip_video_filter(context_);
@@ -191,7 +179,7 @@ public:
 		gs_enable_framebuffer_srgb(true);
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
-		set_params({work, nullptr, nullptr, 0.0f}, width, height);
+		set_params({work, nullptr, 0.0f}, width, height);
 		while (gs_effect_loop(effect_, "Output")) {
 			gs_draw_sprite(nullptr, 0, width, height);
 		}
@@ -298,8 +286,10 @@ private:
 			return true;
 		}
 		std::array<float, 128> table{};
-		const auto luma = jpeg_crunch::scaled_table(jpeg_crunch::kLumaTable, settings_.quality);
-		const auto chroma = jpeg_crunch::scaled_table(jpeg_crunch::kChromaTable, settings_.quality);
+		const auto luma =
+			jpeg_crunch::scaled_table(jpeg_crunch::kLumaTable, settings_.quality, settings_.multiplier);
+		const auto chroma =
+			jpeg_crunch::scaled_table(jpeg_crunch::kChromaTable, settings_.quality, settings_.multiplier);
 		std::copy(luma.begin(), luma.end(), table.begin());
 		std::copy(chroma.begin(), chroma.end(), table.begin() + 64);
 		const auto *data = reinterpret_cast<const uint8_t *>(table.data());
@@ -324,7 +314,7 @@ private:
 				return false;
 			}
 		}
-		return work_[0] && work_[1] && luma_[0] && luma_[1] && chroma_[0] && chroma_[1];
+		return work_[0] && work_[1] && coef_[0] && coef_[1];
 	}
 
 	obs_source_t *context_ = nullptr;
@@ -332,8 +322,7 @@ private:
 	std::array<gs_eparam_t *, kParamCount> params_{};
 	gs_texrender_t *source_ = nullptr;
 	std::array<gs_texrender_t *, 2> work_{};
-	std::array<gs_texrender_t *, 2> luma_{};
-	std::array<gs_texrender_t *, 2> chroma_{};
+	std::array<gs_texrender_t *, 2> coef_{};
 	gs_texture_t *basis_ = nullptr;
 	gs_texture_t *qtable_ = nullptr;
 	bool qtable_dirty_ = true;

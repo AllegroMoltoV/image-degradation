@@ -91,6 +91,7 @@ if(WIN32)
     zero
     single
     chain
+    scaled
     max
     alpha
     odd-size
