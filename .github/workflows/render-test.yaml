@@ -18,7 +18,8 @@ permissions:
   contents: read
 env:
   SCENARIOS: zero single chain max alpha odd-size srgb16f extended settings-update
-  BENCH_CRUNCH_VALUES: 1 16 44 100
+  # CI のソフトウェア描画では GPU 時間が参考にならず、最大の設定は 1 フレームに数秒かかる。動作の確認だけのため最小の設定で測る
+  BENCH_CRUNCH_VALUES: 1
 jobs:
   windows-render:
     name: Render on Windows (D3D11)
