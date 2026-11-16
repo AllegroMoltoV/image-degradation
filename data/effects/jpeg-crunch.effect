@@ -1,31 +1,35 @@
-// JPEG で保存し直したような劣化を描くエフェクト。JPEG の符号化と復号の流れを、パスに分けて GPU で計算する。
-// - Capture: 対象の色をアルファで割り戻し、sRGB で符号化した 0-255 の整数にして work に書く
+// JPEG で保存し直したような劣化を、JPEG の計算を近似して軽く描くエフェクト。
+// - Capture: 対象を 1/scale の解像度へ平均で縮め、色をアルファで割り戻し、sRGB で符号化した 0-255 の整数にして work に書く
 // - 保存し直し 1 回分 (フィルターが回数だけ繰り返す)
-//   - LumaRow: 輝度 Y を求め、8x8 のブロックの各行に横方向の DCT をかける
-//   - LumaQuant: 縦方向の DCT をかけ、量子化して元の大きさへ戻す (量子化の丸めだけが情報を落とす)
-//   - LumaInvCol: 縦方向の逆 DCT をかける
-//   - ChromaRow: 色差 Cb と Cr を 2x2 の平均で半分の解像度にし、横方向の DCT をかける
-//   - ChromaQuant、ChromaInvCol: 色差について輝度と同じ処理をする
-//   - Compose: 横方向の逆 DCT をかけ、色差を 2x2 へ拡大し、RGB に戻して 0-255 の整数に丸める
-// - Output: work を線形の値に戻し、元のアルファを掛けて出力する
+//   - RowDCT: Y・Cb・Cr に変換し、8x8 のブロックの各行に横方向の DCT をかける
+//   - ColQuant: 縦方向の DCT をかけ、量子化して元の大きさへ戻す (量子化の丸めだけが情報を落とす)
+//   - ColIDCT: 縦方向の逆 DCT をかける
+//   - Compose: 横方向の逆 DCT をかけ、RGB に戻して 0-255 の整数に丸める
+// - Output: work を最近傍で元の解像度に戻し、線形の値にして元のアルファを掛けて出力する
 //
-// 中間のテクスチャの画素 i は、画像の座標 i - shift に対応する。画像の外は座標を端へ寄せ、端の画素を複製する。
+// JPEG との違い (近似):
+// - 処理の解像度を下げ、ブロックを 8 x scale px に見せる
+// - 色差を半分の解像度へ間引く代わりに、色差も全解像度で DCT と量子化をかけ、戻すときに 2x2 の左上の値を使う
+// - 量子化の表に、JPEG の上限 255 を超える倍率を掛ける
+//
+// DCT の中間のテクスチャの画素 i は、work の座標 i - shift に対応する。work の外は座標を端へ寄せ、端の画素を複製する。
 // 値はすべて Load で読む。補間を通さずに読むためと、OpenGL で点のサンプラーが使われるようにするため。
 // D3D11 と OpenGL の両方でコンパイルできるよう、型の変換はコンストラクタの形で書く。
 // 丸めは round の結果が D3D11 と OpenGL で異なるため、floor(x + 0.5) で書く。
 
 uniform float4x4 ViewProj;
 uniform texture2d image;  // 対象を描いた中間のテクスチャ。色はアルファを掛けた線形の値で読む
-uniform texture2d work;   // 符号化した RGB (0-255 の整数)
-uniform texture2d luma;   // 輝度の DCT の途中の値
-uniform texture2d chroma; // 色差の DCT の途中の値 (r が Cb、g が Cr)
-uniform texture2d basis;  // DCT の基底。(x, u) の画素に C(u) / 2 * cos((2x + 1) u pi / 16)
-uniform texture2d qtable; // 量子化テーブル。(u, v) が輝度、(u, v + 8) が色差
+uniform texture2d work;   // 処理の解像度での、符号化した RGB (0-255 の整数)
+uniform texture2d coef;   // DCT の途中の値 (r が Y、g が Cb、b が Cr)
+uniform texture2d basis;  // DCT の基底 B(u, x) = C(u) / 2 * cos((2x + 1) u pi / 16)。4 x 8 の RGBA。
+                          // (0, u) と (1, u) が B(u, 0..7)、(2, x) と (3, x) が B(0..7, x)。8 値を 2 回の読み込みで得る
+uniform texture2d qtable; // 量子化の表。(u, v) が輝度、(u, v + 8) が色差
 
-uniform float2 image_size;  // 画像の幅と高さ (px)
-uniform float2 chroma_size; // 色差の画像の幅と高さ (px)。ceil(image_size / 2)
+uniform float2 image_size;  // 対象の幅と高さ (px)
+uniform float2 work_size;   // 処理の解像度での幅と高さ (px)。ceil(image_size / scale)
 uniform float2 target_size; // このパスで描くテクスチャの幅と高さ (px)
-uniform float shift;        // 格子のずらし量 (px)。偶数
+uniform float scale;        // 処理の解像度を 1/scale にする。1・2・4
+uniform float shift;        // 格子のずらし量 (処理の解像度での px)。偶数
 
 struct VertInOut {
 	float4 pos : POSITION;
@@ -52,9 +56,26 @@ float block_pos(float v)
 	return v - floor(v / 8.0) * 8.0;
 }
 
-float dct_basis(float u, float x)
+// 順変換で使う B(u, 0..3) と B(u, 4..7)
+float4 forward_lo(float u)
 {
-	return basis.Load(int3(int(x), int(u), 0)).r;
+	return basis.Load(int3(0, int(u), 0));
+}
+
+float4 forward_hi(float u)
+{
+	return basis.Load(int3(1, int(u), 0));
+}
+
+// 逆変換で使う B(0..3, x) と B(4..7, x)
+float4 inverse_lo(float x)
+{
+	return basis.Load(int3(2, int(x), 0));
+}
+
+float4 inverse_hi(float x)
+{
+	return basis.Load(int3(3, int(x), 0));
 }
 
 float srgb_encode(float v)
@@ -72,21 +93,34 @@ float3 work_rgb(float x, float y)
 	return work.Load(int3(int(x), int(y), 0)).rgb;
 }
 
-// JFIF の式。中心を 0 に寄せた値を返す (DCT の前の 128 の減算を含む)
-float luma_of(float3 rgb)
+// JFIF の式。Y は DCT の前の 128 の減算を含め、中心を 0 に寄せた値を返す
+float3 ycc_of(float3 rgb)
 {
-	return dot(rgb, float3(0.299, 0.587, 0.114)) - 128.0;
-}
-
-float2 chroma_of(float3 rgb)
-{
-	return float2(dot(rgb, float3(-0.168736, -0.331264, 0.5)), dot(rgb, float3(0.5, -0.418688, -0.081312)));
+	return float3(dot(rgb, float3(0.299, 0.587, 0.114)) - 128.0, dot(rgb, float3(-0.168736, -0.331264, 0.5)),
+		      dot(rgb, float3(0.5, -0.418688, -0.081312)));
 }
 
 float4 PSCapture(VertInOut v_in) : TARGET
 {
 	float2 p = pixel_of(v_in.uv);
-	float4 c = image.Load(int3(int(p.x), int(p.y), 0));
+	float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+	float count = 0.0;
+	for (int dy = 0; dy < 4; ++dy) {
+		if (float(dy) >= scale) {
+			break;
+		}
+		for (int dx = 0; dx < 4; ++dx) {
+			if (float(dx) >= scale) {
+				break;
+			}
+			float2 q = p * scale + float2(float(dx), float(dy));
+			if (q.x < image_size.x && q.y < image_size.y) {
+				sum += image.Load(int3(int(q.x), int(q.y), 0));
+				count += 1.0;
+			}
+		}
+	}
+	float4 c = sum / max(count, 1.0);
 	float3 rgb = float3(0.0, 0.0, 0.0);
 	if (c.a > 0.0) {
 		rgb = clamp(c.rgb / c.a, 0.0, 1.0);
@@ -95,96 +129,67 @@ float4 PSCapture(VertInOut v_in) : TARGET
 	return float4(floor(encoded * 255.0 + 0.5), 1.0);
 }
 
-float4 PSLumaRow(VertInOut v_in) : TARGET
+float4 PSRowDCT(VertInOut v_in) : TARGET
 {
 	float2 p = pixel_of(v_in.uv);
 	float u = block_pos(p.x);
 	float b0 = p.x - u;
-	float y = clamp(p.y - shift, 0.0, image_size.y - 1.0);
-	float sum = 0.0;
-	for (int i = 0; i < 8; ++i) {
-		float x = clamp(b0 + float(i) - shift, 0.0, image_size.x - 1.0);
-		sum += dct_basis(u, float(i)) * luma_of(work_rgb(x, y));
+	float y = clamp(p.y - shift, 0.0, work_size.y - 1.0);
+	float4 lo = forward_lo(u);
+	float4 hi = forward_hi(u);
+	float3 sum = float3(0.0, 0.0, 0.0);
+	for (int i = 0; i < 4; ++i) {
+		float x = clamp(b0 + float(i) - shift, 0.0, work_size.x - 1.0);
+		sum += lo[i] * ycc_of(work_rgb(x, y));
 	}
-	return float4(sum, 0.0, 0.0, 0.0);
+	for (int n = 0; n < 4; ++n) {
+		float x = clamp(b0 + float(n + 4) - shift, 0.0, work_size.x - 1.0);
+		sum += hi[n] * ycc_of(work_rgb(x, y));
+	}
+	return float4(sum, 0.0);
 }
 
-float4 PSLumaQuant(VertInOut v_in) : TARGET
+float3 coef_at(float x, float y)
+{
+	return coef.Load(int3(int(x), int(y), 0)).rgb;
+}
+
+float4 PSColQuant(VertInOut v_in) : TARGET
 {
 	float2 p = pixel_of(v_in.uv);
 	float u = block_pos(p.x);
 	float v = block_pos(p.y);
 	float b0 = p.y - v;
-	float sum = 0.0;
-	for (int j = 0; j < 8; ++j) {
-		sum += dct_basis(v, float(j)) * luma.Load(int3(int(p.x), int(b0 + float(j)), 0)).r;
+	float4 lo = forward_lo(v);
+	float4 hi = forward_hi(v);
+	float3 sum = float3(0.0, 0.0, 0.0);
+	for (int j = 0; j < 4; ++j) {
+		sum += lo[j] * coef_at(p.x, b0 + float(j));
 	}
-	float q = qtable.Load(int3(int(u), int(v), 0)).r;
-	return float4(floor(sum / q + 0.5) * q, 0.0, 0.0, 0.0);
+	for (int n = 0; n < 4; ++n) {
+		sum += hi[n] * coef_at(p.x, b0 + float(n + 4));
+	}
+	float luma_q = qtable.Load(int3(int(u), int(v), 0)).r;
+	float chroma_q = qtable.Load(int3(int(u), int(v + 8.0), 0)).r;
+	float3 q = float3(luma_q, chroma_q, chroma_q);
+	return float4(floor(sum / q + 0.5) * q, 0.0);
 }
 
-float4 PSLumaInvCol(VertInOut v_in) : TARGET
+float4 PSColIDCT(VertInOut v_in) : TARGET
 {
 	float2 p = pixel_of(v_in.uv);
 	float y = block_pos(p.y);
 	float b0 = p.y - y;
-	float sum = 0.0;
-	for (int j = 0; j < 8; ++j) {
-		sum += dct_basis(float(j), y) * luma.Load(int3(int(p.x), int(b0 + float(j)), 0)).r;
+	float4 lo = inverse_lo(y);
+	float4 hi = inverse_hi(y);
+	float3 sum = float3(0.0, 0.0, 0.0);
+	for (int j = 0; j < 4; ++j) {
+		sum += lo[j] * coef_at(p.x, b0 + float(j));
 	}
-	return float4(sum, 0.0, 0.0, 0.0);
-}
-
-// 色差の画像の画素 (cx, cy) の値。画像の 2x2 の画素の平均から求める。奇数の幅と高さの端は端の画素を複製する
-float2 chroma_at(float cx, float cy)
-{
-	float x0 = cx * 2.0;
-	float y0 = cy * 2.0;
-	float x1 = min(x0 + 1.0, image_size.x - 1.0);
-	float y1 = min(y0 + 1.0, image_size.y - 1.0);
-	float3 rgb = (work_rgb(x0, y0) + work_rgb(x1, y0) + work_rgb(x0, y1) + work_rgb(x1, y1)) * 0.25;
-	return chroma_of(rgb);
-}
-
-float4 PSChromaRow(VertInOut v_in) : TARGET
-{
-	float2 p = pixel_of(v_in.uv);
-	float half_shift = shift * 0.5;
-	float u = block_pos(p.x);
-	float b0 = p.x - u;
-	float cy = clamp(p.y - half_shift, 0.0, chroma_size.y - 1.0);
-	float2 sum = float2(0.0, 0.0);
-	for (int i = 0; i < 8; ++i) {
-		float cx = clamp(b0 + float(i) - half_shift, 0.0, chroma_size.x - 1.0);
-		sum += dct_basis(u, float(i)) * chroma_at(cx, cy);
+	for (int n = 0; n < 4; ++n) {
+		sum += hi[n] * coef_at(p.x, b0 + float(n + 4));
 	}
-	return float4(sum, 0.0, 0.0);
-}
-
-float4 PSChromaQuant(VertInOut v_in) : TARGET
-{
-	float2 p = pixel_of(v_in.uv);
-	float u = block_pos(p.x);
-	float v = block_pos(p.y);
-	float b0 = p.y - v;
-	float2 sum = float2(0.0, 0.0);
-	for (int j = 0; j < 8; ++j) {
-		sum += dct_basis(v, float(j)) * chroma.Load(int3(int(p.x), int(b0 + float(j)), 0)).rg;
-	}
-	float q = qtable.Load(int3(int(u), int(v + 8.0), 0)).r;
-	return float4(floor(sum / q + 0.5) * q, 0.0, 0.0);
-}
-
-float4 PSChromaInvCol(VertInOut v_in) : TARGET
-{
-	float2 p = pixel_of(v_in.uv);
-	float y = block_pos(p.y);
-	float b0 = p.y - y;
-	float2 sum = float2(0.0, 0.0);
-	for (int j = 0; j < 8; ++j) {
-		sum += dct_basis(float(j), y) * chroma.Load(int3(int(p.x), int(b0 + float(j)), 0)).rg;
-	}
-	return float4(sum, 0.0, 0.0);
+	return float4(sum, 0.0);
 }
 
 float4 PSCompose(VertInOut v_in) : TARGET
@@ -194,20 +199,30 @@ float4 PSCompose(VertInOut v_in) : TARGET
 	float j = p.y + shift;
 	float u0 = block_pos(i);
 	float b0 = i - u0;
+	float4 lo = inverse_lo(u0);
+	float4 hi = inverse_hi(u0);
 	float y = 128.0;
-	for (int k = 0; k < 8; ++k) {
-		y += dct_basis(float(k), u0) * luma.Load(int3(int(b0 + float(k)), int(j), 0)).r;
+	for (int k = 0; k < 4; ++k) {
+		y += lo[k] * coef_at(b0 + float(k), j).r;
+	}
+	for (int n = 0; n < 4; ++n) {
+		y += hi[n] * coef_at(b0 + float(n + 4), j).r;
 	}
 
-	// 色差は 2x2 の画素で同じ値を使う (最近傍の拡大)
-	float2 c = floor(p * 0.5);
-	float ci = c.x + shift * 0.5;
-	float cj = c.y + shift * 0.5;
+	// 色差は 2x2 の画素で、左上の画素の値を使う (色差の間引きの近似)
+	float2 c = floor(p * 0.5) * 2.0;
+	float ci = c.x + shift;
+	float cj = c.y + shift;
 	float cu = block_pos(ci);
 	float cb0 = ci - cu;
+	float4 clo = inverse_lo(cu);
+	float4 chi = inverse_hi(cu);
 	float2 cbcr = float2(0.0, 0.0);
-	for (int m = 0; m < 8; ++m) {
-		cbcr += dct_basis(float(m), cu) * chroma.Load(int3(int(cb0 + float(m)), int(cj), 0)).rg;
+	for (int m = 0; m < 4; ++m) {
+		cbcr += clo[m] * coef_at(cb0 + float(m), cj).gb;
+	}
+	for (int n2 = 0; n2 < 4; ++n2) {
+		cbcr += chi[n2] * coef_at(cb0 + float(n2 + 4), cj).gb;
 	}
 
 	float3 rgb = float3(y + 1.402 * cbcr.y, y - 0.344136 * cbcr.x - 0.714136 * cbcr.y, y + 1.772 * cbcr.x);
@@ -217,7 +232,8 @@ float4 PSCompose(VertInOut v_in) : TARGET
 float4 PSOutput(VertInOut v_in) : TARGET
 {
 	float2 p = pixel_of(v_in.uv);
-	float3 encoded = work_rgb(p.x, p.y) / 255.0;
+	float2 w = floor(p / scale);
+	float3 encoded = work_rgb(w.x, w.y) / 255.0;
 	float a = image.Load(int3(int(p.x), int(p.y), 0)).a;
 	float3 rgb = float3(srgb_decode(encoded.r), srgb_decode(encoded.g), srgb_decode(encoded.b));
 	return float4(rgb * a, a);
@@ -232,57 +248,30 @@ technique Capture
 	}
 }
 
-technique LumaRow
+technique RowDCT
 {
 	pass
 	{
 		vertex_shader = VSDefault(v_in);
-		pixel_shader = PSLumaRow(v_in);
+		pixel_shader = PSRowDCT(v_in);
 	}
 }
 
-technique LumaQuant
+technique ColQuant
 {
 	pass
 	{
 		vertex_shader = VSDefault(v_in);
-		pixel_shader = PSLumaQuant(v_in);
+		pixel_shader = PSColQuant(v_in);
 	}
 }
 
-technique LumaInvCol
+technique ColIDCT
 {
 	pass
 	{
 		vertex_shader = VSDefault(v_in);
-		pixel_shader = PSLumaInvCol(v_in);
-	}
-}
-
-technique ChromaRow
-{
-	pass
-	{
-		vertex_shader = VSDefault(v_in);
-		pixel_shader = PSChromaRow(v_in);
-	}
-}
-
-technique ChromaQuant
-{
-	pass
-	{
-		vertex_shader = VSDefault(v_in);
-		pixel_shader = PSChromaQuant(v_in);
-	}
-}
-
-technique ChromaInvCol
-{
-	pass
-	{
-		vertex_shader = VSDefault(v_in);
-		pixel_shader = PSChromaInvCol(v_in);
+		pixel_shader = PSColIDCT(v_in);
 	}
 }
 
