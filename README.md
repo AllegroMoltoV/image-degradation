@@ -16,15 +16,15 @@ This plugin sends nothing over the network. The GPU processes the image inside t
 
 ソースやグループに付ける映像フィルターです。設定はガビガビ度のスライダー 1 本だけです。0 では元の映像のまま、上げるほど 8×8 のブロックの境界が目立ち、色がにじみ、輪郭の周りにノイズが出ます。
 
-実際の JPEG と同じ計算で劣化を作ります。RGB を YCbCr に変換し、色差を半分の解像度に間引き、8×8 のブロックごとに DCT をかけ、JPEG の標準の量子化テーブル (ITU-T T.81 Annex K) で丸めて元に戻します。ガビガビ度を上げると、JPEG の品質を下げながら、この保存し直しを最大 8 回繰り返します。回ごとにブロックの格子をずらすため、同じ格子で繰り返したときのように劣化が止まりません。
+JPEG の計算を軽く近似して劣化を作ります。RGB を YCbCr に変換し、8×8 のブロックごとに DCT をかけ、JPEG の標準の量子化テーブル (ITU-T T.81 Annex K) で丸めて元に戻します。ガビガビ度を上げると、JPEG の品質を下げます。50 からは、解像度を下げてブロックを 16 px と 32 px に大きくし、量子化を JPEG の上限より最大 10 倍粗くしながら、この保存し直しを最大 4 回繰り返します。回ごとにブロックの格子をずらすため、同じ格子で繰り返したときのように劣化が止まりません。
 
-描画はすべて GPU のシェーダーで行います。1920×1080 の 1 フレームあたりの GPU 時間は、ガビガビ度 1 (1 回) で約 0.5 ms、既定値の 50 (4 回) で約 1.7 ms、最大の 100 (8 回) で約 3.3 ms です (RTX 3060 Ti、Direct3D 11 で測定)。
+描画はすべて GPU のシェーダーで行います。1920×1080 の 1 フレームあたりの GPU 時間は、ガビガビ度 1〜49 で約 0.5〜0.6 ms、50〜100 で約 0.3 ms です (RTX 3060 Ti、Direct3D 11 で測定)。
 
 A video filter for sources and groups with a single "Crunch" slider. At 0 the image passes through unchanged. Higher values bring out 8×8 block edges, color bleeding, and ringing around edges.
 
-The damage is made with the same math as a real JPEG: RGB is converted to YCbCr, chroma is subsampled to half resolution, each 8×8 block goes through a DCT, and the coefficients are rounded with the standard JPEG quantization tables (ITU-T T.81 Annex K) and converted back. Raising the slider lowers the JPEG quality and repeats this save up to eight times. The block grid shifts on each pass, so the damage keeps growing instead of settling as it would on a fixed grid.
+The damage is made with a lightweight approximation of JPEG: RGB is converted to YCbCr, each 8×8 block goes through a DCT, and the coefficients are rounded with the standard JPEG quantization tables (ITU-T T.81 Annex K) and converted back. Raising the slider lowers the JPEG quality. From 50 upward, the resolution is reduced so that blocks grow to 16 and 32 pixels, quantization becomes up to ten times coarser than JPEG allows, and the save is repeated up to four times. The block grid shifts on each pass, so the damage keeps growing instead of settling as it would on a fixed grid.
 
-All drawing runs in GPU shaders. GPU time per 1920×1080 frame is about 0.5 ms at Crunch 1 (one pass), about 1.7 ms at the default of 50 (four passes), and about 3.3 ms at the maximum of 100 (eight passes), measured on an RTX 3060 Ti with Direct3D 11.
+All drawing runs in GPU shaders. GPU time per 1920×1080 frame is about 0.5–0.6 ms at Crunch 1–49 and about 0.3 ms at 50–100, measured on an RTX 3060 Ti with Direct3D 11.
 
 ## Installation / インストール
 
@@ -113,30 +113,31 @@ gh attestation verify simple-jpeg-crunch-1.0.0-windows-x64.zip --repo AllegroMol
 |-----------|--------|-------|---------|
 | Crunch | ガビガビ度 | 0 ~ 100 | 50 |
 
-ガビガビ度に対応する JPEG の品質と保存し直しの回数は次のとおりです。
+ガビガビ度に対応する値は次のとおりです。
 
-| ガビガビ度 / Crunch | 品質 / Quality | 回数 / Saves |
-|-----------|--------|-------|
-| 0 | 処理しない / off | 0 |
-| 1 | 90 | 1 |
-| 25 | 69 | 2 |
-| 50 | 48 | 4 |
-| 75 | 26 | 6 |
-| 100 | 5 | 8 |
+| ガビガビ度 / Crunch | 品質 / Quality | 量子化の倍率 / Quantization × | ブロック / Block | 回数 / Saves |
+|-----------|--------|-------|-------|-------|
+| 0 | 処理しない / off | - | - | 0 |
+| 1 | 90 | 1 | 8 px | 1 |
+| 25 | 48 | 1 | 8 px | 1 |
+| 50 | 5 | 1 | 16 px | 2 |
+| 75 | 5 | 5.5 | 16 px | 2 |
+| 80 | 5 | 6.4 | 32 px | 3 |
+| 100 | 5 | 10 | 32 px | 4 |
 
 ## Known Behavior / 既知の挙動
 
 - ソースに付けると、そのソースの不透明な部分だけが劣化します。透明な部分と、奥にあるほかのソースは元のままです。シーンやグループに付けると、中の項目を重ねた後の絵全体にかかり、奥のソースも劣化します。
 - HDR の映像 (Rec. 709 の拡張の色空間) では、OBS Studio の標準のシャープフィルターと同じく、劣化をかけずにそのまま通します。
-- 色差は 2×2 の画素で同じ値を使って元の解像度に戻します。そのため、色の境界がブロック状ににじみます。
+- 色差は 2×2 の画素で同じ値を使います。そのため、色の境界がブロック状ににじみます。
 - 半透明の画素は、色をアルファで割り戻してから劣化させます。アルファは元のまま残します。
-- ガビガビ度を上げるほど GPU の負荷が増えます。重いときはガビガビ度を下げてください。
+- 実際の JPEG のファイルの読み書きはしません。見た目を近づけた近似のため、同じ品質で保存した JPEG と画素の値は一致しません。
 
 - On a source, only its opaque parts are damaged. Transparent parts and other sources behind it stay unchanged. On a scene or group, the filter applies to the whole picture after its items are composited, so sources behind are damaged too.
 - HDR images (extended Rec. 709 color space) pass through unchanged, as with the built-in Sharpen filter of OBS Studio.
-- Chroma is restored by repeating each value over 2×2 pixels, so color edges bleed in blocks.
+- Chroma uses one value per 2×2 pixels, so color edges bleed in blocks.
 - Translucent pixels are damaged after their color is divided by alpha. Alpha itself is kept unchanged.
-- GPU load rises with the Crunch value. Lower it if the filter is too heavy.
+- No real JPEG file is written or read. The look is approximated, so pixel values do not match a JPEG saved at the same quality.
 
 ## Build / ビルド
 
