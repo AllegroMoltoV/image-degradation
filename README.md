@@ -209,6 +209,6 @@ AllegroMoltoV - https://www.allegromoltov.jp
 
 ## Changelog / 更新情報
 
-### v1.0.0
+### v1.0.0 (2026-11-16)
 
 - 最初の公開版です。 / First public release.
