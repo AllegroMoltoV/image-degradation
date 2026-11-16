@@ -10,6 +10,7 @@ context compaction で文脈が失われた場合は、この索引から必要�
 | 流用元 simple-mosaic の構成、倉庫くんの掲載条件、エフェクトの言語の制約 | `docs/reports/2026-11-16-initial-survey.md` |
 | 実行ログ (生の出力。git 追跡対象外) | `.logs/` |
 | 実行ログ (残す価値があると判断したもの) | `docs/logs/` |
+| OBS Studio での使い心地の確認の手順と質問 | `docs/usability-check.md` |
 | ロゴ (案 A を採用) と、案を生成するスクリプト | `docs/images/logo.svg`・`logo.png`・`generate-logos.py` |
 | 統合テストの結果、境目の幅の校正、1920x1080 の GPU 時間 | `docs/logs/2026-11-16-render-tests-and-gpu-time.md` |
 | 計画と決定事項 (Beads 使用時の正本) | `bd show <親課題>` |
