@@ -290,6 +290,18 @@ inline void paint_translucent(Image &image)
 	}
 }
 
+// 左半分が paint_scene の不透明な絵、右半分が完全な透明 (色は黒) の絵
+inline void paint_half_transparent(Image &image)
+{
+	paint_scene(image);
+	for (uint32_t y = 0; y < image.height; ++y) {
+		for (uint32_t x = image.width / 2; x < image.width; ++x) {
+			uint8_t *p = image.at(x, y);
+			p[0] = p[1] = p[2] = p[3] = 0;
+		}
+	}
+}
+
 // 非圧縮の 24 ビットか 32 ビットの BMP を読む。失敗したときは空の画像を返す
 inline Image read_bmp(const std::string &path)
 {

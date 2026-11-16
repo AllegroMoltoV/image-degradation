@@ -290,6 +290,69 @@ const Scenario scenarios[] = {
 		 obs_source_release(filter);
 		 obs_source_release(source);
 	 }},
+	// シーンの中で、フィルターを付けたソースだけが劣化する。ほかのソースと、付けたソースの透明な部分は、付ける前と同じ
+	{"scene",
+	 [](Checker &c) {
+		 constexpr uint32_t kLeft = 16;
+		 constexpr uint32_t kTop = 12;
+		 constexpr uint32_t kWidth = 32;
+		 constexpr uint32_t kHeight = 24;
+		 obs_scene_t *scene = obs_scene_create("scene");
+		 obs_source_t *background =
+			 create_test_source({kCanvasWidth, kCanvasHeight, paint_gradient}, "background");
+		 obs_source_t *overlay = create_test_source({kWidth, kHeight, paint_half_transparent}, "overlay");
+		 obs_sceneitem_t *overlay_item = nullptr;
+		 if (scene && background && overlay) {
+			 obs_scene_add(scene, background);
+			 overlay_item = obs_scene_add(scene, overlay);
+			 vec2 pos;
+			 vec2_set(&pos, static_cast<float>(kLeft), static_cast<float>(kTop));
+			 obs_sceneitem_set_pos(overlay_item, &pos);
+		 }
+		 obs_source_t *scene_source = scene ? obs_scene_get_source(scene) : nullptr;
+		 obs_data_t *settings = crunch_settings(jpeg_crunch::kMaxCrunch);
+		 obs_source_t *filter = obs_source_create(kFilterId, "jpeg-crunch", settings, nullptr);
+		 obs_data_release(settings);
+		 Image before;
+		 if (!scene_source || !overlay_item || !filter) {
+			 c.expect(false, "failed to create the scene or the filter");
+		 } else if (wait_frames(2) && render_filtered(c, "scene-before", scene_source, before)) {
+			 obs_source_filter_add(overlay, filter);
+			 c.expect(wait_frames(2), "frames did not advance");
+			 Image after;
+			 if (render_filtered(c, "scene", scene_source, after)) {
+				 size_t changed_inside = 0;
+				 for (uint32_t y = 0; y < after.height; ++y) {
+					 for (uint32_t x = 0; x < after.width; ++x) {
+						 const bool opaque_part = x >= kLeft && x < kLeft + kWidth / 2 &&
+									  y >= kTop && y < kTop + kHeight;
+						 bool same = true;
+						 for (int ch = 0; ch < 4; ++ch) {
+							 same &= std::abs(after.at(x, y)[ch] - before.at(x, y)[ch]) <=
+								 1;
+						 }
+						 if (opaque_part) {
+							 changed_inside += same ? 0 : 1;
+						 } else {
+							 c.expect(
+								 same,
+								 "pixel " + at(x, y) +
+									 " outside the opaque part of the filtered source changed");
+						 }
+					 }
+				 }
+				 c.expect(changed_inside > 0, "the opaque part of the filtered source did not change");
+			 }
+		 }
+		 obs_source_release(filter);
+		 obs_source_release(overlay);
+		 obs_source_release(background);
+		 if (scene) {
+			 // OBS 31 以降はキャンバスがシーンを保持するため、キャンバスから外してから解放する
+			 obs_source_remove(scene_source);
+			 obs_scene_release(scene);
+		 }
+	 }},
 	// ガビガビ度の変更が出力に反映される
 	{"settings-update",
 	 [](Checker &c) {
