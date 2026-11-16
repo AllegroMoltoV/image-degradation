@@ -88,7 +88,7 @@ cmake --build .deps/obs-studio-31.1.1/build_x64 --config Release --target libobs
 
 掲載の後にワークフローを変えると、次の版が管理者の確認待ちになります (RC:45-48)。アクションの SHA 固定、permissions の最小化、`persist-credentials: false`、dependabot.yml、証明の手順、タグのビルドでの ccache の無効化は、最初の版の前に済ませます。審査の勧告として、CMake に `-fsanitize` と `/GS` か `-fstack-protector` を書くこと (`build-hardening`) も挙がっています。
 
-README・リリースノート・リポジトリ内の文書には、SmartScreen などの無効化の案内や、貼り付けて実行するコマンドを書きません。否定の文脈でも重大の指摘になります (RC:58,75-76)。
+README・リリースノート・リポジトリ内の文書には、OS の保護機能を外させる案内と、貼り付けて実行するコマンドを書きません。照合は語で行われるため、否定の文脈で保護機能の名前を挙げても重大の指摘になります (RC:58,75-76)。
 
 ## 調査結果: エフェクトの言語の制約
 
