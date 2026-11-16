@@ -13,6 +13,8 @@ include(ccache)
 include(compiler_common)
 
 add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-fopenmp-simd>")
+# -fstack-protector-strong はスタックの破壊を検出する
+add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-fstack-protector-strong>")
 
 # Ensure recent enough Xcode and platform SDK
 function(check_sdk_requirements)

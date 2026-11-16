@@ -26,8 +26,10 @@ if(CMAKE_CXX_STANDARD GREATER_EQUAL 20)
   list(APPEND _obs_msvc_cpp_options /Zc:char8_t-)
 endif()
 
+# /GS はスタックの破壊を検出する。MSVC の既定でも有効だが、配布物の保護を設定として明示する
 add_compile_options(
   /W3
+  /GS
   /utf-8
   /Brepro
   /permissive-

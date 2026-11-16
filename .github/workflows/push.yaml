@@ -9,7 +9,7 @@ on:
     tags:
       - '*'
 permissions:
-  contents: write
+  contents: read
 jobs:
   check-format:
     name: Check Formatting 🔍
@@ -45,7 +45,6 @@ jobs:
           if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
           shopt -s extglob
 
-          # v1.0.0 の形のタグも受け付ける。version はタグ名のまま使う
           case "${GITHUB_REF_NAME}" in
             ?(v)+([0-9]).+([0-9]).+([0-9]) )
               echo 'validTag=true' >> $GITHUB_OUTPUT
@@ -61,7 +60,7 @@ jobs:
           esac
 
       - name: Download Build Artifacts 📥
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: fromJSON(steps.check.outputs.validTag)
         id: download
 
@@ -77,8 +76,7 @@ jobs:
           commit_hash="${GITHUB_SHA:0:9}"
 
           variants=(
-            'windows-x64;zip|exe'
-            'macos-universal;tar.xz|pkg'
+            'windows-x64;zip'
             'ubuntu-24.04-x86_64;tar.xz|deb|ddeb'
             'sources;tar.xz'
           )
@@ -101,7 +99,7 @@ jobs:
           shopt -s extglob
 
           echo "### Checksums" > ${{ github.workspace }}/CHECKSUMS.txt
-          for file in ${{ github.workspace }}/@(*.exe|*.deb|*.ddeb|*.pkg|*.tar.xz|*.zip); do
+          for file in ${{ github.workspace }}/@(*.deb|*.ddeb|*.tar.xz|*.zip); do
             echo "    ${file##*/}: $(sha256sum "${file}" | cut -d " " -f 1)" >> ${{ github.workspace }}/CHECKSUMS.txt
           done
 
@@ -109,15 +107,12 @@ jobs:
         if: fromJSON(steps.check.outputs.validTag)
         run: |
           : List Release Files 📋
-          if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
           shopt -s extglob
           shopt -s nullglob
-
           cd ${{ github.workspace }}
-          files=(@(*.exe|*.zip|*.pkg|*.deb|*.ddeb|*.tar.xz))
+          files=(@(*.zip|*.deb|*.ddeb|*.tar.xz))
           sha256sum "${files[@]}" > ${{ runner.temp }}/release-checksums.txt
 
-      # 配信プラグイン倉庫くんの掲載の条件: リリースのすべての配布物に、このタグのビルドの来歴の証明を付ける
       - name: Attest Build Provenance 🔏
         if: fromJSON(steps.check.outputs.validTag)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -127,7 +122,7 @@ jobs:
       - name: Create Release 🛫
         if: fromJSON(steps.check.outputs.validTag)
         id: create_release
-        uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564
+        uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564 # v2.0.4
         with:
           draft: true
           prerelease: ${{ fromJSON(steps.check.outputs.prerelease) }}
@@ -135,9 +130,7 @@ jobs:
           name: ${{ needs.build-project.outputs.pluginName }} ${{ steps.check.outputs.version }}
           body_path: ${{ github.workspace }}/CHECKSUMS.txt
           files: |
-            ${{ github.workspace }}/*.exe
             ${{ github.workspace }}/*.zip
-            ${{ github.workspace }}/*.pkg
             ${{ github.workspace }}/*.deb
             ${{ github.workspace }}/*.ddeb
             ${{ github.workspace }}/*.tar.xz
