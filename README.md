@@ -16,15 +16,15 @@ This plugin sends nothing over the network. The GPU processes the image inside t
 
 ソースやグループに付ける映像フィルターです。設定はガビガビ度のスライダー 1 本だけです。0 では元の映像のまま、上げるほど 8×8 のブロックの境界が目立ち、色がにじみ、輪郭の周りにノイズが出ます。
 
-JPEG の計算を軽く近似して劣化を作ります。RGB を YCbCr に変換し、8×8 のブロックごとに DCT をかけ、JPEG の標準の量子化テーブル (ITU-T T.81 Annex K) で丸めて元に戻します。ガビガビ度を上げると、JPEG の品質を下げます。50 からは、解像度を下げてブロックを 16 px と 32 px に大きくし、量子化を JPEG の上限より最大 10 倍粗くしながら、この保存し直しを最大 4 回繰り返します。回ごとにブロックの格子をずらすため、同じ格子で繰り返したときのように劣化が止まりません。
+JPEG の計算を軽く近似して劣化を作ります。RGB を YCbCr に変換し、8×8 のブロックごとに DCT をかけ、JPEG の標準の量子化テーブル (ITU-T T.81 Annex K) で丸めて元に戻します。ガビガビ度は対数の曲線で効かせ、低い範囲ほど変化が大きくなるようにしています。上げると、まず JPEG の品質を下げます。さらに上げると、量子化を JPEG の上限より最大 10 倍粗くし、解像度を下げてブロックを 16・24・32 px に大きくしながら、この保存し直しを最大 4 回繰り返します。回ごとにブロックの格子をずらすため、同じ格子で繰り返したときのように劣化が止まりません。
 
-描画はすべて GPU のシェーダーで行います。1920×1080 の 1 フレームあたりの GPU 時間は、ガビガビ度 1〜49 で約 0.5〜0.6 ms、50〜100 で約 0.3 ms です (RTX 3060 Ti、Direct3D 11 で測定)。
+描画はすべて GPU のシェーダーで行います。1920×1080 の 1 フレームあたりの GPU 時間は、ガビガビ度 1〜33 で約 0.5〜0.6 ms、34〜100 で約 0.2〜0.3 ms です (RTX 3060 Ti、Direct3D 11 で測定)。
 
 A video filter for sources and groups with a single "Crunch" slider. At 0 the image passes through unchanged. Higher values bring out 8×8 block edges, color bleeding, and ringing around edges.
 
-The damage is made with a lightweight approximation of JPEG: RGB is converted to YCbCr, each 8×8 block goes through a DCT, and the coefficients are rounded with the standard JPEG quantization tables (ITU-T T.81 Annex K) and converted back. Raising the slider lowers the JPEG quality. From 50 upward, the resolution is reduced so that blocks grow to 16 and 32 pixels, quantization becomes up to ten times coarser than JPEG allows, and the save is repeated up to four times. The block grid shifts on each pass, so the damage keeps growing instead of settling as it would on a fixed grid.
+The damage is made with a lightweight approximation of JPEG: RGB is converted to YCbCr, each 8×8 block goes through a DCT, and the coefficients are rounded with the standard JPEG quantization tables (ITU-T T.81 Annex K) and converted back. The slider follows a logarithmic curve, so it changes the most at the low end. Raising it first lowers the JPEG quality. Further up, quantization becomes up to ten times coarser than JPEG allows, the resolution is reduced so that blocks grow to 16, 24, and 32 pixels, and the save is repeated up to four times. The block grid shifts on each pass, so the damage keeps growing instead of settling as it would on a fixed grid.
 
-All drawing runs in GPU shaders. GPU time per 1920×1080 frame is about 0.5–0.6 ms at Crunch 1–49 and about 0.3 ms at 50–100, measured on an RTX 3060 Ti with Direct3D 11.
+All drawing runs in GPU shaders. GPU time per 1920×1080 frame is about 0.5–0.6 ms at Crunch 1–33 and about 0.2–0.3 ms at 34–100, measured on an RTX 3060 Ti with Direct3D 11.
 
 ## Installation / インストール
 
@@ -118,11 +118,12 @@ gh attestation verify simple-jpeg-crunch-1.0.0-windows-x64.zip --repo AllegroMol
 | ガビガビ度 / Crunch | 品質 / Quality | 量子化の倍率 / Quantization × | ブロック / Block | 回数 / Saves |
 |-----------|--------|-------|-------|-------|
 | 0 | 処理しない / off | - | - | 0 |
-| 1 | 90 | 1 | 8 px | 1 |
-| 25 | 48 | 1 | 8 px | 1 |
-| 50 | 5 | 1 | 16 px | 2 |
-| 75 | 5 | 5.5 | 16 px | 2 |
-| 80 | 5 | 6.4 | 32 px | 3 |
+| 1 | 84 | 1 | 8 px | 1 |
+| 10 | 43 | 1 | 8 px | 1 |
+| 20 | 14 | 1 | 8 px | 1 |
+| 30 | 5 | 2.2 | 8 px | 1 |
+| 50 | 5 | 5.3 | 16 px | 2 |
+| 70 | 5 | 7.5 | 24 px | 3 |
 | 100 | 5 | 10 | 32 px | 4 |
 
 ## Known Behavior / 既知の挙動

@@ -168,10 +168,11 @@ double mean_abs_diff(const Image &a, const Image &b)
 
 const SourceSpec scene = {kCanvasWidth, kCanvasHeight, paint_scene};
 // 等倍の解像度で 1 回の保存し直しになるガビガビ度、2 回になるガビガビ度 (解像度は 1/2)、
-// 1/2 と 1/4 の解像度になるガビガビ度
+// 1/2・1/3・1/4 の解像度になるガビガビ度
 constexpr int kSinglePass = 10;
-constexpr int kTwoPasses = 60;
-constexpr int kHalfScale = 70;
+constexpr int kTwoPasses = 45;
+constexpr int kHalfScale = 50;
+constexpr int kThirdScale = 70;
 constexpr int kQuarterScale = 90;
 
 struct Scenario {
@@ -205,6 +206,7 @@ const Scenario scenarios[] = {
 	{"scaled",
 	 [](Checker &c) {
 		 reference_scenario(c, "scaled-half", scene, kHalfScale);
+		 reference_scenario(c, "scaled-third", scene, kThirdScale);
 		 reference_scenario(c, "scaled-quarter", scene, kQuarterScale);
 	 }},
 	// 最大のガビガビ度。回を重ねると丸めの境目の差が連鎖して広がるため、CPU 参照との比較は記録だけにし、
@@ -403,7 +405,7 @@ const Scenario scenarios[] = {
 					 image = photo;
 				 }};
 		 }
-		 for (const int crunch : {0, 25, 50, 75, 100}) {
+		 for (const int crunch : {0, 10, 20, 30, 50, 70, 100}) {
 			 with_filter(c, spec, crunch, [&](Checker &c, obs_source_t *source, obs_source_t *) {
 				 std::ostringstream name;
 				 name << "preview-" << std::setw(3) << std::setfill('0') << crunch;

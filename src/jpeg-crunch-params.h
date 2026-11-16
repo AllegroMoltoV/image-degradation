@@ -39,6 +39,7 @@ constexpr std::array<int, 64> kChromaTable = {
 };
 
 // 回ごとの格子のずらし量 (処理の解像度での px)。色差は 2x2 の画素で同じ値にするため偶数にし、色差の 2x2 の区切りを保つ。
+// 回数は解像度の縮小率と同じで、最大 4 回
 // 1 回目は 0 にして、1 回だけのときは通常の JPEG と同じ格子にする
 constexpr std::array<int, kMaxPasses> kShifts = {0, 6, 10, 4};
 // 中間のテクスチャに足す余白 (px)。ずらし量の最大値以上にする
@@ -47,29 +48,29 @@ constexpr int kMaxShift = 10;
 struct Settings {
 	int quality = 0;         // JPEG の品質 1-100。0 は処理しないことを示す
 	int passes = 0;          // 保存し直しの回数
-	int scale = 1;           // 処理の解像度を 1/scale にする。ブロックが 8 x scale px に見える
+	int scale = 1;           // 処理の解像度を 1/scale にする (1-4)。ブロックが 8 x scale px に見える
 	float multiplier = 1.0f; // 量子化の表に掛ける倍率。JPEG の上限 255 を超えて粗くする
 };
 
 // ガビガビ度 (0-100) を写す。0 は処理しない。
-// GPU の負荷は、処理の解像度での画素の数と回数の積で決まる。等倍の解像度では回数を 1 回に抑え、
-// 回数は解像度を下げる範囲で増やす。
-// - 回数: 1-49 で 1 回、50-79 で 2 回、80-99 で 3 回、100 で 4 回
-// - 品質: 1 の 90 から 50 の 5 へ下げ、以降は 5
-// - 解像度: 1-49 で等倍、50-79 で 1/2、80-100 で 1/4
-// - 倍率: 50 までは 1、以降は 100 の 10 へ上げる
+// 崩れ方の感じ方は、低い範囲で鈍く高い範囲で急になりやすい。そこでガビガビ度を対数の曲線
+// t = log(1 + 9g/100) / log(10) で 0-1 に写し、低い範囲ほど変化を大きくする。g = 10 で t = 0.28、30 で 0.57、50 で 0.74。
+// GPU の負荷は、処理の解像度での画素の数と回数の積で決まるため、回数は解像度を下げる範囲で増やす。
+// - 品質: t = 0 の 90 から t = 0.5 の 5 へ下げ、以降は 5
+// - 倍率: t = 0.5 までは 1、以降は t = 1 の 10 へ上げる
+// - 解像度と回数: t < 0.6 で等倍・1 回、0.8 未満で 1/2・2 回、0.92 未満で 1/3・3 回、以降は 1/4・4 回
 inline Settings settings_for(int crunch)
 {
 	crunch = std::clamp(crunch, kMinCrunch, kMaxCrunch);
 	if (crunch == 0) {
 		return {};
 	}
-	const int step = crunch - 1;
+	const double t = std::log(1.0 + 9.0 * crunch / 100.0) / std::log(10.0);
 	Settings s;
-	s.passes = crunch < 50 ? 1 : (crunch < 80 ? 2 : (crunch < 100 ? 3 : 4));
-	s.quality = 90 - (std::min(step, 49) * 85 + 24) / 49;
-	s.scale = crunch < 50 ? 1 : (crunch < 80 ? 2 : 4);
-	s.multiplier = 1.0f + static_cast<float>(std::max(crunch - 50, 0)) * 9.0f / 50.0f;
+	s.quality = 90 - static_cast<int>(std::lround(85.0 * std::min(t / 0.5, 1.0)));
+	s.multiplier = static_cast<float>(1.0 + 9.0 * std::max((t - 0.5) / 0.5, 0.0));
+	s.scale = t < 0.6 ? 1 : (t < 0.8 ? 2 : (t < 0.92 ? 3 : 4));
+	s.passes = s.scale;
 	return s;
 }
 
