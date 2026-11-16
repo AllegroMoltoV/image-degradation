@@ -1,12 +1,12 @@
-// JPEG の劣化のフィルターの出力を画素で検査する統合テスト。
-// 出力を、同じ計算を CPU で行う参照 (jpeg-reference.hpp) と比べる。量子化の丸めの境目に近い値に依存する画素は、
+// 劣化のフィルターの出力を画素で検査する統合テスト。
+// 出力を、同じ計算を CPU で行う参照 (degradation-reference.hpp) と比べる。量子化の丸めの境目に近い値に依存する画素は、
 // 浮動小数点の僅かな誤差で GPU と CPU の結果が分かれうるため、比較から外す。外した画素の割合にも上限を置く。
 // 使い方: integration-test <プラグイン> <プラグインの data> <描画モジュール> <libobs の data> <シナリオ>
 // 終了コードは、合格が 0、検査の不合格が 1、起動の失敗が 2。
 // preview のシナリオは CTest に登録しない。ガビガビ度ごとの出力を書き出して、依頼者が見た目を確かめるために使う。
 
-#include "jpeg-crunch-fixture.hpp"
-#include "jpeg-reference.hpp"
+#include "image-degradation-fixture.hpp"
+#include "degradation-reference.hpp"
 
 #include <cstring>
 #include <iomanip>
@@ -14,7 +14,7 @@
 
 namespace {
 
-using namespace jpeg_crunch_test;
+using namespace image_degradation_test;
 
 constexpr uint32_t kCanvasWidth = 64;
 constexpr uint32_t kCanvasHeight = 48;
@@ -61,8 +61,8 @@ void check_reference(Checker &c, const std::string &label, const Image &input, c
 	for (size_t i = 0, n = static_cast<size_t>(input.width) * input.height; i < n; ++i) {
 		std::copy_n(&input.rgba[i * 4], 3, &rgb[i * 3]);
 	}
-	const jpeg_reference::Result ref =
-		jpeg_reference::run(rgb, static_cast<int>(input.width), static_cast<int>(input.height), crunch);
+	const degradation_reference::Result ref =
+		degradation_reference::run(rgb, static_cast<int>(input.width), static_cast<int>(input.height), crunch);
 	size_t comparable = 0;
 	size_t mismatched = 0;
 	size_t changed = 0;
@@ -128,7 +128,7 @@ void with_filter(Checker &c, const SourceSpec &spec, int crunch, const FilterChe
 {
 	obs_source_t *source = create_test_source(spec);
 	obs_data_t *settings = crunch_settings(crunch);
-	obs_source_t *filter = obs_source_create(kFilterId, "jpeg-crunch", settings, nullptr);
+	obs_source_t *filter = obs_source_create(kFilterId, "image-degradation", settings, nullptr);
 	obs_data_release(settings);
 	if (!source || !filter) {
 		c.expect(false, "failed to create the test source or the filter");
@@ -206,29 +206,31 @@ const Scenario scenarios[] = {
 	{"max",
 	 [](Checker &c) {
 		 const Image input = paint_image(scene);
-		 with_filter(c, scene, jpeg_crunch::kMaxCrunch, [&](Checker &c, obs_source_t *source, obs_source_t *) {
-			 Image out;
-			 if (!render_filtered(c, "max", source, out)) {
-				 return;
-			 }
-			 for (uint32_t y = 0; y < out.height; ++y) {
-				 for (uint32_t x = 0; x < out.width; ++x) {
-					 c.expect(out.at(x, y)[3] == 255, "alpha changed at " + at(x, y));
-				 }
-			 }
-			 const double diff = mean_abs_diff(input, out);
-			 std::cout << "max: mean absolute difference from the input " << diff << '\n';
-			 c.expect(diff > 2.0, "the output at the maximum is too close to the input");
-			 Checker record;
-			 check_reference(record, "max (recorded only)", input, out, jpeg_crunch::kMaxCrunch);
-		 });
+		 with_filter(c, scene, image_degradation::kMaxCrunch,
+			     [&](Checker &c, obs_source_t *source, obs_source_t *) {
+				     Image out;
+				     if (!render_filtered(c, "max", source, out)) {
+					     return;
+				     }
+				     for (uint32_t y = 0; y < out.height; ++y) {
+					     for (uint32_t x = 0; x < out.width; ++x) {
+						     c.expect(out.at(x, y)[3] == 255, "alpha changed at " + at(x, y));
+					     }
+				     }
+				     const double diff = mean_abs_diff(input, out);
+				     std::cout << "max: mean absolute difference from the input " << diff << '\n';
+				     c.expect(diff > 2.0, "the output at the maximum is too close to the input");
+				     Checker record;
+				     check_reference(record, "max (recorded only)", input, out,
+						     image_degradation::kMaxCrunch);
+			     });
 	 }},
 	// 半透明の入力でも、出力のアルファは入力のアルファのまま残る
 	{"alpha",
 	 [](Checker &c) {
 		 const SourceSpec spec = {kCanvasWidth, kCanvasHeight, paint_translucent};
 		 const Image input = paint_image(spec);
-		 with_filter(c, spec, jpeg_crunch::kDefaultCrunch,
+		 with_filter(c, spec, image_degradation::kDefaultCrunch,
 			     [&](Checker &c, obs_source_t *source, obs_source_t *) {
 				     Image out;
 				     if (!render_filtered(c, "alpha", source, out)) {
@@ -277,8 +279,8 @@ const Scenario scenarios[] = {
 		 SourceSpec spec = scene;
 		 spec.space = GS_CS_709_EXTENDED;
 		 obs_source_t *source = create_test_source(spec);
-		 obs_data_t *settings = crunch_settings(jpeg_crunch::kMaxCrunch);
-		 obs_source_t *filter = obs_source_create(kFilterId, "jpeg-crunch", settings, nullptr);
+		 obs_data_t *settings = crunch_settings(image_degradation::kMaxCrunch);
+		 obs_source_t *filter = obs_source_create(kFilterId, "image-degradation", settings, nullptr);
 		 obs_data_release(settings);
 		 Image before;
 		 Image after;
@@ -314,8 +316,8 @@ const Scenario scenarios[] = {
 			 obs_sceneitem_set_pos(overlay_item, &pos);
 		 }
 		 obs_source_t *scene_source = scene ? obs_scene_get_source(scene) : nullptr;
-		 obs_data_t *settings = crunch_settings(jpeg_crunch::kMaxCrunch);
-		 obs_source_t *filter = obs_source_create(kFilterId, "jpeg-crunch", settings, nullptr);
+		 obs_data_t *settings = crunch_settings(image_degradation::kMaxCrunch);
+		 obs_source_t *filter = obs_source_create(kFilterId, "image-degradation", settings, nullptr);
 		 obs_data_release(settings);
 		 Image before;
 		 if (!scene_source || !overlay_item || !filter) {
@@ -382,12 +384,12 @@ const Scenario scenarios[] = {
 			 }
 		 });
 	 }},
-	// 目視の確認用。環境変数 JPEG_CRUNCH_TEST_INPUT に BMP があればそれを、無ければ合成した絵を入力にし、
-	// ガビガビ度ごとの出力を JPEG_CRUNCH_TEST_OUTPUT_DIR に書き出す
+	// 目視の確認用。環境変数 IMAGE_DEGRADATION_TEST_INPUT に BMP があればそれを、無ければ合成した絵を入力にし、
+	// ガビガビ度ごとの出力を IMAGE_DEGRADATION_TEST_OUTPUT_DIR に書き出す
 	{"preview",
 	 [](Checker &c) {
 		 SourceSpec spec = {640, 360, paint_scene};
-		 if (const char *path = std::getenv("JPEG_CRUNCH_TEST_INPUT")) {
+		 if (const char *path = std::getenv("IMAGE_DEGRADATION_TEST_INPUT")) {
 			 const Image photo = read_bmp(path);
 			 if (photo.rgba.empty()) {
 				 c.expect(false, std::string("failed to read ") + path);

@@ -1,10 +1,10 @@
-name: Render JPEG crunch
+name: Render image degradation
 # JPEG の劣化のエフェクトのコンパイルと描画を、各 OS の描画方式で確かめる。
 # - Windows: D3D11。GPU の無いランナーでは DXGI のソフトウェアのアダプター (WARP) で描く
 # - Ubuntu: Mesa の OpenGL
 # - macOS: OpenGL
 # 開発者は macOS と Linux の機材を持たないため、この 2 つの OS の描画はこのワークフローで検証する。
-# jpeg-crunch-integration-test は検査に外れると終了コード 1 を返す。jpeg-crunch-benchmark は GPU 時間を記録するだけで、合否には使わない
+# image-degradation-integration-test は検査に外れると終了コード 1 を返す。image-degradation-benchmark は GPU 時間を記録するだけで、合否には使わない
 on:
   workflow_dispatch:
   pull_request:
@@ -47,15 +47,15 @@ jobs:
       - name: List graphics adapters
         run: Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion | Format-Table -AutoSize
 
-      - name: Render JPEG crunch
+      - name: Render image degradation
         run: |
           New-Item -ItemType Directory -Path test-images | Out-Null
-          $env:JPEG_CRUNCH_TEST_OUTPUT_DIR = "$PWD\test-images"
+          $env:IMAGE_DEGRADATION_TEST_OUTPUT_DIR = "$PWD\test-images"
           ctest --test-dir build_x64 -C RelWithDebInfo -R d3d11 --output-on-failure 2>&1 | Tee-Object -FilePath render-windows.log
           $failed = $LASTEXITCODE
           $env:PATH = "$PWD\.deps\bin\64bit;$PWD\.deps\obs-deps-2025-07-11-x64\bin;$env:PATH"
           # LoadLibrary は相対パスのプラグインを読み込めないため、絶対パスで渡す
-          & "$PWD\build_x64\RelWithDebInfo\jpeg-crunch-benchmark.exe" "$PWD\build_x64\RelWithDebInfo\simple-jpeg-crunch.dll" `
+          & "$PWD\build_x64\RelWithDebInfo\image-degradation-benchmark.exe" "$PWD\build_x64\RelWithDebInfo\image-degradation.dll" `
             "$PWD\data" "$PWD\.deps\obs-studio-31.1.1\build_x64\libobs-d3d11\Release\libobs-d3d11.dll" `
             "$PWD\.deps\obs-studio-31.1.1\libobs\data" $env:BENCH_CRUNCH_VALUES.Split(' ') 2>&1 |
             Tee-Object -FilePath render-windows.log -Append
@@ -96,18 +96,18 @@ jobs:
       - name: Build render tests
         run: |
           cmake -S . -B build_x86_64 -DENABLE_RENDER_TESTS=ON
-          cmake --build build_x86_64 --config RelWithDebInfo --target jpeg-crunch-integration-test jpeg-crunch-benchmark
+          cmake --build build_x86_64 --config RelWithDebInfo --target image-degradation-integration-test image-degradation-benchmark
 
-      - name: Render JPEG crunch
+      - name: Render image degradation
         run: |
           set -o pipefail
-          plugin=$(find "$PWD/build_x86_64" -name 'simple-jpeg-crunch.so' -print -quit)
-          integration=$(find "$PWD/build_x86_64" -name 'jpeg-crunch-integration-test' -type f -print -quit)
-          bench=$(find "$PWD/build_x86_64" -name 'jpeg-crunch-benchmark' -type f -print -quit)
+          plugin=$(find "$PWD/build_x86_64" -name 'image-degradation.so' -print -quit)
+          integration=$(find "$PWD/build_x86_64" -name 'image-degradation-integration-test' -type f -print -quit)
+          bench=$(find "$PWD/build_x86_64" -name 'image-degradation-benchmark' -type f -print -quit)
           gl=$(find /usr/lib -name 'libobs-opengl.so*' -print -quit)
           echo "plugin=${plugin} integration=${integration} bench=${bench} gl=${gl}"
           mkdir -p test-images
-          export JPEG_CRUNCH_TEST_OUTPUT_DIR="$PWD/test-images"
+          export IMAGE_DEGRADATION_TEST_OUTPUT_DIR="$PWD/test-images"
           failed=0
           for scenario in ${SCENARIOS}; do
             if xvfb-run -a -s '-screen 0 1280x720x24' "${integration}" "${plugin}" "$PWD/data" "${gl}" \
@@ -158,14 +158,14 @@ jobs:
       - name: Build render tests and OpenGL module
         run: |
           cmake -S . -B build_macos -DENABLE_RENDER_TESTS=ON
-          cmake --build build_macos --config RelWithDebInfo --target jpeg-crunch-integration-test jpeg-crunch-benchmark
+          cmake --build build_macos --config RelWithDebInfo --target image-degradation-integration-test image-degradation-benchmark
           cmake --build .deps/obs-studio-31.1.1/build_universal --config Release --target libobs-opengl
 
-      - name: Render JPEG crunch
+      - name: Render image degradation
         run: |
-          plugin=$(find "$PWD/build_macos" -path '*RelWithDebInfo/simple-jpeg-crunch.plugin/Contents/MacOS/simple-jpeg-crunch' -print -quit)
-          integration=$(find "$PWD/build_macos" -name 'jpeg-crunch-integration-test' -type f -perm -u+x -print -quit)
-          bench=$(find "$PWD/build_macos" -name 'jpeg-crunch-benchmark' -type f -perm -u+x -print -quit)
+          plugin=$(find "$PWD/build_macos" -path '*RelWithDebInfo/image-degradation.plugin/Contents/MacOS/image-degradation' -print -quit)
+          integration=$(find "$PWD/build_macos" -name 'image-degradation-integration-test' -type f -perm -u+x -print -quit)
+          bench=$(find "$PWD/build_macos" -name 'image-degradation-benchmark' -type f -perm -u+x -print -quit)
           gl=$(find "$PWD/.deps/obs-studio-31.1.1/build_universal" \( -name 'libobs-opengl.dylib' -o -name 'libobs-opengl.so' \) -print -quit)
           print "plugin=${plugin} integration=${integration} bench=${bench} gl=${gl}"
           # 実行ファイルと libobs-opengl は @rpath の libobs.framework を参照する。ビルド時の framework は .deps/Frameworks、
@@ -176,7 +176,7 @@ jobs:
           export DYLD_LIBRARY_PATH="${deps_lib}"
           core="$PWD/.deps/obs-studio-31.1.1/libobs/data"
           mkdir -p test-images
-          export JPEG_CRUNCH_TEST_OUTPUT_DIR="$PWD/test-images"
+          export IMAGE_DEGRADATION_TEST_OUTPUT_DIR="$PWD/test-images"
           failed=0
           for scenario in ${=SCENARIOS}; do
             if "${integration}" "${plugin}" "$PWD/data" "${gl}" "${core}" "${scenario}" >> render-macos.log 2>&1; then

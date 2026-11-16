@@ -36,8 +36,8 @@
             "bundleId": "com.example.plugintemplate-for-obs"
         }
     },
-    "name": "simple-jpeg-crunch",
-    "displayName": "シンプルJPEG劣化 / Simple JPEG Crunch",
+    "name": "image-degradation",
+    "displayName": "ガビガビエフェクト / Image Degradation",
     "version": "1.0.0",
     "author": "AllegroMoltoV",
     "website": "https://www.allegromoltov.jp",

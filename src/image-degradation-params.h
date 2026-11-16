@@ -2,13 +2,13 @@
 
 // 劣化の数値の定義。フィルターと、テストの CPU 参照の両方が使う。
 // 両者が同じ表と同じ写像を使わないと、テストが実装の誤りではなく定義の食い違いで失敗するため、ここに一本化する。
-// 劣化は、ネットで転載を重ねた画像の見た目を軽く近似したもの。処理の流れは jpeg-crunch.effect の冒頭にある。
+// 劣化は、ネットで転載を重ねた画像の見た目を軽く近似したもの。処理の流れは image-degradation.effect の冒頭にある。
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 
-namespace jpeg_crunch {
+namespace image_degradation {
 
 constexpr int kMinCrunch = 0;
 constexpr int kMaxCrunch = 100;
@@ -107,4 +107,4 @@ inline int padded_size(int size)
 	return (size + 7) / 8 * 8;
 }
 
-} // namespace jpeg_crunch
+} // namespace image_degradation

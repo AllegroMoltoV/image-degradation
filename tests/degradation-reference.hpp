@@ -1,13 +1,13 @@
 #pragma once
 
-// フィルターと同じ計算を CPU で行う参照の実装。jpeg-crunch.effect のパスと同じ順序、同じ式、同じ丸めで計算する。
+// フィルターと同じ計算を CPU で行う参照の実装。image-degradation.effect のパスと同じ順序、同じ式、同じ丸めで計算する。
 //
 // 丸め (floor(x + 0.5)) は、値がちょうど境目にあると、浮動小数点の僅かな誤差で GPU と CPU の結果が分かれる。
 // そこで各値に、その値が依存する丸めの判定のうち、境目に最も近いものとの距離 (余裕) を持たせる。
 // 1 つの値は周りの複数の値から作るため、余裕はそれらの最小値として伝播する。
 // 余裕が小さい画素は、GPU と CPU で結果が分かれうるため比較から外す。
 
-#include "../src/jpeg-crunch-params.h"
+#include "../src/image-degradation-params.h"
 
 #include <algorithm>
 #include <array>
@@ -16,7 +16,7 @@
 #include <limits>
 #include <vector>
 
-namespace jpeg_reference {
+namespace degradation_reference {
 
 constexpr float kNoTie = std::numeric_limits<float>::infinity();
 
@@ -88,7 +88,7 @@ inline float round_channel(float v, float &margin)
 // input は不透明な画像の符号化した RGB (幅 x 高さ x 3)
 inline Result run(const std::vector<uint8_t> &input, int width, int height, int crunch)
 {
-	using namespace jpeg_crunch;
+	using namespace image_degradation;
 	const Settings settings = settings_for(crunch);
 	const std::array<float, 64> basis = dct_basis();
 	const auto basis_at = [&basis](int u, int x) {
@@ -281,4 +281,4 @@ inline Result run(const std::vector<uint8_t> &input, int width, int height, int 
 	return result;
 }
 
-} // namespace jpeg_reference
+} // namespace degradation_reference
