@@ -90,7 +90,6 @@ if(WIN32)
     _scenarios
     zero
     single
-    chain
     scaled
     max
     alpha

@@ -1,24 +1,21 @@
-// JPEG で保存し直したような劣化を、JPEG の計算を近似して軽く描くエフェクト。
-// - Capture: 対象を 1/scale の解像度へ平均で縮め、色をアルファで割り戻し、sRGB で符号化した 0-255 の整数にして work に書く
-// - 保存し直し 1 回分 (フィルターが回数だけ繰り返す)
+// ネットで転載を重ねた画像のような劣化を、軽い近似で描くエフェクト。
+// - Capture: 色をアルファで割り戻し、sRGB で符号化した 0-255 の整数にしてから、1/scale の解像度へ平均で縮めて work に書く
+// - JPEG の圧縮 1 回分
 //   - RowDCT: Y・Cb・Cr に変換し、8x8 のブロックの各行に横方向の DCT をかける
 //   - ColQuant: 縦方向の DCT をかけ、量子化して元の大きさへ戻す (量子化の丸めだけが情報を落とす)
 //   - ColIDCT: 縦方向の逆 DCT をかける
 //   - Compose: 横方向の逆 DCT をかけ、RGB に戻して 0-255 の整数に丸める
-// - Output: work を最近傍で元の解像度に戻し、線形の値にして元のアルファを掛けて出力する
+// - Post: 色のずれ、シャープの縁取り、彩度とコントラストの持ち上げをかけ、0-255 の整数に丸める
+// - Output: 縮めた画像を双線形補間で元の解像度に戻し (ぼけ)、線形の値にして元のアルファを掛けて出力する
 //
-// JPEG との違い (近似):
-// - 処理の解像度を下げ、ブロックを 8 x scale px に見せる
-// - 色差を半分の解像度へ間引く代わりに、色差も全解像度で DCT と量子化をかけ、戻すときに 2x2 の左上の値を使う
-// - 量子化の表に、JPEG の上限 255 を超える倍率を掛ける
-//
-// DCT の中間のテクスチャの画素 i は、work の座標 i - shift に対応する。work の外は座標を端へ寄せ、端の画素を複製する。
+// JPEG との違い (近似): 色差を半分の解像度へ間引く代わりに、色差も全解像度で DCT と量子化をかけ、戻すときに 2x2 の左上の値を使う。
+// 双線形補間は、CPU の参照で同じ計算ができるよう、サンプラーではなく Load で 4 点を読んで計算する。
 // 値はすべて Load で読む。補間を通さずに読むためと、OpenGL で点のサンプラーが使われるようにするため。
 // D3D11 と OpenGL の両方でコンパイルできるよう、型の変換はコンストラクタの形で書く。
 // 丸めは round の結果が D3D11 と OpenGL で異なるため、floor(x + 0.5) で書く。
 
 uniform float4x4 ViewProj;
-uniform texture2d image;  // 対象を描いた中間のテクスチャ。色はアルファを掛けた線形の値で読む
+uniform texture2d image;  // 対象を描いた中間のテクスチャ。色はアルファを掛けた値。8 ビットでは符号化したまま、16 ビットでは線形の値で読む
 uniform texture2d work;   // 処理の解像度での、符号化した RGB (0-255 の整数)
 uniform texture2d coef;   // DCT の途中の値 (r が Y、g が Cb、b が Cr)
 uniform texture2d basis;  // DCT の基底 B(u, x) = C(u) / 2 * cos((2x + 1) u pi / 16)。4 x 8 の RGBA。
@@ -28,8 +25,12 @@ uniform texture2d qtable; // 量子化の表。(u, v) が輝度、(u, v + 8) が
 uniform float2 image_size;  // 対象の幅と高さ (px)
 uniform float2 work_size;   // 処理の解像度での幅と高さ (px)。ceil(image_size / scale)
 uniform float2 target_size; // このパスで描くテクスチャの幅と高さ (px)
-uniform float scale;        // 処理の解像度を 1/scale にする。1・2・4
-uniform float shift;        // 格子のずらし量 (処理の解像度での px)。偶数
+uniform float scale;        // 処理の解像度を 1/scale にする
+uniform float saturation;   // 彩度の倍率
+uniform float contrast;     // コントラストの倍率 (128 を中心にする)
+uniform float sharpen;      // シャープの強さ
+uniform float color_shift;  // 色のずれ (処理の解像度での px)
+uniform float linear_input; // image が線形の値 (16 ビット) なら 1、sRGB で符号化した値 (8 ビット) なら 0
 
 struct VertInOut {
 	float4 pos : POSITION;
@@ -88,9 +89,17 @@ float srgb_decode(float v)
 	return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
 }
 
+// work の画素。座標は端へ寄せる
 float3 work_rgb(float x, float y)
 {
-	return work.Load(int3(int(x), int(y), 0)).rgb;
+	float cx = clamp(x, 0.0, work_size.x - 1.0);
+	float cy = clamp(y, 0.0, work_size.y - 1.0);
+	return work.Load(int3(int(cx), int(cy), 0)).rgb;
+}
+
+float3 coef_at(float x, float y)
+{
+	return coef.Load(int3(int(x), int(y), 0)).rgb;
 }
 
 // JFIF の式。Y は DCT の前の 128 の減算を含め、中心を 0 に寄せた値を返す
@@ -100,10 +109,25 @@ float3 ycc_of(float3 rgb)
 		      dot(rgb, float3(0.5, -0.418688, -0.081312)));
 }
 
+// 対象の画素を、アルファで割り戻して sRGB で符号化した 0-255 の整数にする。
+// 平均を符号化した値で取るのは近似で、整数にしてから足すのは、GPU と CPU で同じ平均を得るため
+float3 encoded_at(float2 q)
+{
+	float4 c = image.Load(int3(int(q.x), int(q.y), 0));
+	float3 rgb = float3(0.0, 0.0, 0.0);
+	if (c.a > 0.0) {
+		rgb = clamp(c.rgb / c.a, 0.0, 1.0);
+	}
+	if (linear_input > 0.5) {
+		rgb = float3(srgb_encode(rgb.r), srgb_encode(rgb.g), srgb_encode(rgb.b));
+	}
+	return floor(rgb * 255.0 + 0.5);
+}
+
 float4 PSCapture(VertInOut v_in) : TARGET
 {
 	float2 p = pixel_of(v_in.uv);
-	float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+	float3 sum = float3(0.0, 0.0, 0.0);
 	float count = 0.0;
 	for (int dy = 0; dy < 4; ++dy) {
 		if (float(dy) >= scale) {
@@ -115,18 +139,12 @@ float4 PSCapture(VertInOut v_in) : TARGET
 			}
 			float2 q = p * scale + float2(float(dx), float(dy));
 			if (q.x < image_size.x && q.y < image_size.y) {
-				sum += image.Load(int3(int(q.x), int(q.y), 0));
+				sum += encoded_at(q);
 				count += 1.0;
 			}
 		}
 	}
-	float4 c = sum / max(count, 1.0);
-	float3 rgb = float3(0.0, 0.0, 0.0);
-	if (c.a > 0.0) {
-		rgb = clamp(c.rgb / c.a, 0.0, 1.0);
-	}
-	float3 encoded = float3(srgb_encode(rgb.r), srgb_encode(rgb.g), srgb_encode(rgb.b));
-	return float4(floor(encoded * 255.0 + 0.5), 1.0);
+	return float4(floor(sum / max(count, 1.0) + 0.5), 1.0);
 }
 
 float4 PSRowDCT(VertInOut v_in) : TARGET
@@ -134,24 +152,16 @@ float4 PSRowDCT(VertInOut v_in) : TARGET
 	float2 p = pixel_of(v_in.uv);
 	float u = block_pos(p.x);
 	float b0 = p.x - u;
-	float y = clamp(p.y - shift, 0.0, work_size.y - 1.0);
 	float4 lo = forward_lo(u);
 	float4 hi = forward_hi(u);
 	float3 sum = float3(0.0, 0.0, 0.0);
 	for (int i = 0; i < 4; ++i) {
-		float x = clamp(b0 + float(i) - shift, 0.0, work_size.x - 1.0);
-		sum += lo[i] * ycc_of(work_rgb(x, y));
+		sum += lo[i] * ycc_of(work_rgb(b0 + float(i), p.y));
 	}
 	for (int n = 0; n < 4; ++n) {
-		float x = clamp(b0 + float(n + 4) - shift, 0.0, work_size.x - 1.0);
-		sum += hi[n] * ycc_of(work_rgb(x, y));
+		sum += hi[n] * ycc_of(work_rgb(b0 + float(n + 4), p.y));
 	}
 	return float4(sum, 0.0);
-}
-
-float3 coef_at(float x, float y)
-{
-	return coef.Load(int3(int(x), int(y), 0)).rgb;
 }
 
 float4 PSColQuant(VertInOut v_in) : TARGET
@@ -195,48 +205,70 @@ float4 PSColIDCT(VertInOut v_in) : TARGET
 float4 PSCompose(VertInOut v_in) : TARGET
 {
 	float2 p = pixel_of(v_in.uv);
-	float i = p.x + shift;
-	float j = p.y + shift;
-	float u0 = block_pos(i);
-	float b0 = i - u0;
+	float u0 = block_pos(p.x);
+	float b0 = p.x - u0;
 	float4 lo = inverse_lo(u0);
 	float4 hi = inverse_hi(u0);
 	float y = 128.0;
 	for (int k = 0; k < 4; ++k) {
-		y += lo[k] * coef_at(b0 + float(k), j).r;
+		y += lo[k] * coef_at(b0 + float(k), p.y).r;
 	}
 	for (int n = 0; n < 4; ++n) {
-		y += hi[n] * coef_at(b0 + float(n + 4), j).r;
+		y += hi[n] * coef_at(b0 + float(n + 4), p.y).r;
 	}
 
 	// 色差は 2x2 の画素で、左上の画素の値を使う (色差の間引きの近似)
 	float2 c = floor(p * 0.5) * 2.0;
-	float ci = c.x + shift;
-	float cj = c.y + shift;
-	float cu = block_pos(ci);
-	float cb0 = ci - cu;
+	float cu = block_pos(c.x);
+	float cb0 = c.x - cu;
 	float4 clo = inverse_lo(cu);
 	float4 chi = inverse_hi(cu);
 	float2 cbcr = float2(0.0, 0.0);
 	for (int m = 0; m < 4; ++m) {
-		cbcr += clo[m] * coef_at(cb0 + float(m), cj).gb;
+		cbcr += clo[m] * coef_at(cb0 + float(m), c.y).gb;
 	}
 	for (int n2 = 0; n2 < 4; ++n2) {
-		cbcr += chi[n2] * coef_at(cb0 + float(n2 + 4), cj).gb;
+		cbcr += chi[n2] * coef_at(cb0 + float(n2 + 4), c.y).gb;
 	}
 
 	float3 rgb = float3(y + 1.402 * cbcr.y, y - 0.344136 * cbcr.x - 0.714136 * cbcr.y, y + 1.772 * cbcr.x);
 	return float4(clamp(floor(rgb + 0.5), 0.0, 255.0), 1.0);
 }
 
+float4 PSPost(VertInOut v_in) : TARGET
+{
+	float2 p = pixel_of(v_in.uv);
+	float3 center = work_rgb(p.x, p.y);
+	// 色のずれ: R を左、B を右の画素から読む
+	float3 rgb = float3(work_rgb(p.x - color_shift, p.y).r, center.g, work_rgb(p.x + color_shift, p.y).b);
+	// シャープ: 上下左右の平均との差を足し、輪郭に縁取りを付ける
+	float3 around = (work_rgb(p.x - 1.0, p.y) + work_rgb(p.x + 1.0, p.y) + work_rgb(p.x, p.y - 1.0) +
+			 work_rgb(p.x, p.y + 1.0)) *
+			0.25;
+	rgb = rgb + (center - around) * sharpen;
+	float luma = dot(rgb, float3(0.299, 0.587, 0.114));
+	rgb = float3(luma, luma, luma) + (rgb - float3(luma, luma, luma)) * saturation;
+	rgb = (rgb - float3(128.0, 128.0, 128.0)) * contrast + float3(128.0, 128.0, 128.0);
+	return float4(clamp(floor(rgb + 0.5), 0.0, 255.0), 1.0);
+}
+
 float4 PSOutput(VertInOut v_in) : TARGET
 {
 	float2 p = pixel_of(v_in.uv);
-	float2 w = floor(p / scale);
-	float3 encoded = work_rgb(w.x, w.y) / 255.0;
-	float a = image.Load(int3(int(p.x), int(p.y), 0)).a;
+	// 縮めた画像の画素の中心を基準に、4 点の双線形補間で戻す
+	float2 f = (p + 0.5) / scale - 0.5;
+	float2 i0 = floor(f);
+	float2 w = f - i0;
+	float3 a = work_rgb(i0.x, i0.y);
+	float3 b = work_rgb(i0.x + 1.0, i0.y);
+	float3 c = work_rgb(i0.x, i0.y + 1.0);
+	float3 d = work_rgb(i0.x + 1.0, i0.y + 1.0);
+	float3 top = a + (b - a) * w.x;
+	float3 bottom = c + (d - c) * w.x;
+	float3 encoded = (top + (bottom - top) * w.y) / 255.0;
+	float alpha = image.Load(int3(int(p.x), int(p.y), 0)).a;
 	float3 rgb = float3(srgb_decode(encoded.r), srgb_decode(encoded.g), srgb_decode(encoded.b));
-	return float4(rgb * a, a);
+	return float4(rgb * alpha, alpha);
 }
 
 technique Capture
@@ -281,6 +313,15 @@ technique Compose
 	{
 		vertex_shader = VSDefault(v_in);
 		pixel_shader = PSCompose(v_in);
+	}
+}
+
+technique Post
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader = PSPost(v_in);
 	}
 }
 

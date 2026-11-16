@@ -1,6 +1,6 @@
-// JPEG で何度も保存し直したように映像を劣化させる映像フィルター。
-// ガビガビ度 (0-100) を、処理の解像度・JPEG の品質・量子化の倍率・保存し直しの回数へ写す。YCbCr への変換・8x8 の DCT・
-// 量子化・逆 DCT を近似して GPU のパスで繰り返す。回ごとに 8x8 の格子をずらし、同じ格子で繰り返したときの劣化の頭打ちを避ける。
+// ネットで転載を重ねた画像のように映像を劣化させる映像フィルター。
+// ガビガビ度 (0-100) を、処理の解像度・JPEG の品質・色のずれ・シャープ・彩度・コントラストへ写す。
+// 縮小、JPEG の圧縮の近似、色の加工、補間による拡大を GPU のパスで行う。
 
 #include "jpeg-crunch-params.h"
 
@@ -26,15 +26,21 @@ enum Param {
 	kParamWorkSize,
 	kParamTargetSize,
 	kParamScale,
-	kParamShift,
+	kParamSaturation,
+	kParamContrast,
+	kParamSharpen,
+	kParamColorShift,
+	kParamLinearInput,
 	kParamCount,
 };
 
 constexpr std::array<const char *, kParamCount> kParamNames = {
-	"image", "work", "coef", "basis", "qtable", "image_size", "work_size", "target_size", "scale", "shift",
+	"image",       "work",  "coef",       "basis",    "qtable",  "image_size",  "work_size",
+	"target_size", "scale", "saturation", "contrast", "sharpen", "color_shift", "linear_input",
 };
 
-constexpr std::array<const char *, 6> kTechniques = {"Capture", "RowDCT", "ColQuant", "ColIDCT", "Compose", "Output"};
+constexpr std::array<const char *, 7> kTechniques = {"Capture", "RowDCT", "ColQuant", "ColIDCT",
+						     "Compose", "Post",   "Output"};
 
 // フィルターが受け付ける色空間。sharpness-filter.c と同じく、HDR の 709_EXTENDED では処理を飛ばす
 constexpr std::array<gs_color_space, 3> kSpaces = {GS_CS_SRGB, GS_CS_SRGB_16F, GS_CS_709_EXTENDED};
@@ -97,7 +103,7 @@ public:
 	{
 		const auto crunch = static_cast<int>(obs_data_get_int(settings, kCrunch));
 		const jpeg_crunch::Settings next = jpeg_crunch::settings_for(crunch);
-		if (next.quality != settings_.quality || next.multiplier != settings_.multiplier) {
+		if (next.quant_scale != settings_.quant_scale) {
 			qtable_dirty_ = true;
 		}
 		settings_ = next;
@@ -106,7 +112,7 @@ public:
 	void Render()
 	{
 		obs_source_t *target = obs_filter_get_target(context_);
-		if (!Ready() || !target || settings_.passes == 0) {
+		if (!Ready() || !target || settings_.quant_scale == 0.0f) {
 			obs_source_skip_video_filter(context_);
 			return;
 		}
@@ -133,11 +139,10 @@ public:
 		struct Inputs {
 			gs_texture_t *work = nullptr;
 			gs_texture_t *coef = nullptr;
-			float shift = 0.0f;
 		};
 		const auto set_params = [&](const Inputs &in, uint32_t cx, uint32_t cy) {
-			// 対象の色はアルファを掛けた線形の値で読む。8 ビットの対象は sRGB の符号化を解いて読み、16 ビットの対象はそのまま読む
-			gs_effect_set_texture_srgb(params_[kParamImage], source);
+			// 対象の色はアルファを掛けた値。8 ビットの対象は sRGB で符号化したまま、16 ビットの対象は線形の値で読む
+			gs_effect_set_texture(params_[kParamImage], source);
 			gs_effect_set_texture(params_[kParamWork], in.work);
 			gs_effect_set_texture(params_[kParamCoef], in.coef);
 			gs_effect_set_texture(params_[kParamBasis], basis_);
@@ -150,7 +155,11 @@ public:
 			vec2_set(&size, static_cast<float>(cx), static_cast<float>(cy));
 			gs_effect_set_vec2(params_[kParamTargetSize], &size);
 			gs_effect_set_float(params_[kParamScale], static_cast<float>(scale));
-			gs_effect_set_float(params_[kParamShift], in.shift);
+			gs_effect_set_float(params_[kParamSaturation], settings_.saturation);
+			gs_effect_set_float(params_[kParamContrast], settings_.contrast);
+			gs_effect_set_float(params_[kParamSharpen], settings_.sharpen);
+			gs_effect_set_float(params_[kParamColorShift], static_cast<float>(settings_.color_shift));
+			gs_effect_set_float(params_[kParamLinearInput], space == GS_CS_SRGB_16F ? 1.0f : 0.0f);
 		};
 		const auto pass = [&](gs_texrender_t *output, const char *technique, const Inputs &in, uint32_t cx,
 				      uint32_t cy) -> gs_texture_t * {
@@ -158,16 +167,13 @@ public:
 			return DrawPass(output, technique, cx, cy);
 		};
 
+		// 読み書きする texrender を分けるため、work と coef はそれぞれ 2 つを交互に使う
 		gs_texture_t *work = pass(work_[0], "Capture", {}, work_w, work_h);
-		for (int i = 0; work && i < settings_.passes; ++i) {
-			const auto shift = static_cast<float>(jpeg_crunch::kShifts[i]);
-			gs_texture_t *coef = pass(coef_[0], "RowDCT", {work, nullptr, shift}, coef_w, coef_h);
-			coef = coef ? pass(coef_[1], "ColQuant", {nullptr, coef, shift}, coef_w, coef_h) : nullptr;
-			coef = coef ? pass(coef_[0], "ColIDCT", {nullptr, coef, shift}, coef_w, coef_h) : nullptr;
-			// 読み書きする texrender を分けるため、回ごとに work の出力先を入れ替える
-			work = coef ? pass(work_[(i + 1) % 2], "Compose", {nullptr, coef, shift}, work_w, work_h)
-				    : nullptr;
-		}
+		gs_texture_t *coef = work ? pass(coef_[0], "RowDCT", {work, nullptr}, coef_w, coef_h) : nullptr;
+		coef = coef ? pass(coef_[1], "ColQuant", {nullptr, coef}, coef_w, coef_h) : nullptr;
+		coef = coef ? pass(coef_[0], "ColIDCT", {nullptr, coef}, coef_w, coef_h) : nullptr;
+		work = coef ? pass(work_[1], "Compose", {nullptr, coef}, work_w, work_h) : nullptr;
+		work = work ? pass(work_[0], "Post", {work, nullptr}, work_w, work_h) : nullptr;
 		if (!work) {
 			obs_source_skip_video_filter(context_);
 			return;
@@ -179,7 +185,7 @@ public:
 		gs_enable_framebuffer_srgb(true);
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
-		set_params({work, nullptr, 0.0f}, width, height);
+		set_params({work, nullptr}, width, height);
 		while (gs_effect_loop(effect_, "Output")) {
 			gs_draw_sprite(nullptr, 0, width, height);
 		}
@@ -286,10 +292,8 @@ private:
 			return true;
 		}
 		std::array<float, 128> table{};
-		const auto luma =
-			jpeg_crunch::scaled_table(jpeg_crunch::kLumaTable, settings_.quality, settings_.multiplier);
-		const auto chroma =
-			jpeg_crunch::scaled_table(jpeg_crunch::kChromaTable, settings_.quality, settings_.multiplier);
+		const auto luma = jpeg_crunch::scaled_table(jpeg_crunch::kLumaTable, settings_.quant_scale);
+		const auto chroma = jpeg_crunch::scaled_table(jpeg_crunch::kChromaTable, settings_.quant_scale);
 		std::copy(luma.begin(), luma.end(), table.begin());
 		std::copy(chroma.begin(), chroma.end(), table.begin() + 64);
 		const auto *data = reinterpret_cast<const uint8_t *>(table.data());

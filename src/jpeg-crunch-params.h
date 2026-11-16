@@ -1,8 +1,8 @@
 #pragma once
 
-// JPEG の劣化の数値の定義。フィルターと、テストの CPU 参照の両方が使う。
+// 劣化の数値の定義。フィルターと、テストの CPU 参照の両方が使う。
 // 両者が同じ表と同じ写像を使わないと、テストが実装の誤りではなく定義の食い違いで失敗するため、ここに一本化する。
-// 劣化は JPEG の計算を近似したもので、軽さと崩れ具合を優先する。近似の内容は jpeg-crunch.effect の冒頭にある。
+// 劣化は、ネットで転載を重ねた画像の見た目を軽く近似したもの。処理の流れは jpeg-crunch.effect の冒頭にある。
 
 #include <algorithm>
 #include <array>
@@ -12,9 +12,7 @@ namespace jpeg_crunch {
 
 constexpr int kMinCrunch = 0;
 constexpr int kMaxCrunch = 100;
-constexpr int kDefaultCrunch = 50;
-// 保存し直しの回数の上限
-constexpr int kMaxPasses = 4;
+constexpr int kDefaultCrunch = 10;
 
 // ITU-T T.81 Annex K の Table K.1 (輝度) と Table K.2 (色差)。行は縦の周波数 v、列は横の周波数 u
 constexpr std::array<int, 64> kLumaTable = {
@@ -38,27 +36,23 @@ constexpr std::array<int, 64> kChromaTable = {
 	99, 99, 99, 99, 99, 99, 99, 99,
 };
 
-// 回ごとの格子のずらし量 (処理の解像度での px)。色差は 2x2 の画素で同じ値にするため偶数にし、色差の 2x2 の区切りを保つ。
-// 回数は解像度の縮小率と同じで、最大 4 回
-// 1 回目は 0 にして、1 回だけのときは通常の JPEG と同じ格子にする
-constexpr std::array<int, kMaxPasses> kShifts = {0, 6, 10, 4};
-// 中間のテクスチャに足す余白 (px)。ずらし量の最大値以上にする
-constexpr int kMaxShift = 10;
-
 struct Settings {
-	int quality = 0;         // JPEG の品質 1-100。0 は処理しないことを示す
-	int passes = 0;          // 保存し直しの回数
-	int scale = 1;           // 処理の解像度を 1/scale にする (1-4)。ブロックが 8 x scale px に見える
-	float multiplier = 1.0f; // 量子化の表に掛ける倍率。JPEG の上限 255 を超えて粗くする
+	float quant_scale = 0.0f; // 量子化の表に掛ける倍率 (%)。0 は処理しないことを示す
+	int scale = 1;            // 処理の解像度を 1/scale にする (1-4)。戻すときの補間でぼける
+	float saturation = 1.0f;  // 彩度の倍率
+	float contrast = 1.0f;    // コントラストの倍率 (128 を中心にする)
+	float sharpen = 0.0f;     // シャープの強さ。上下左右の平均との差に掛ける
+	int color_shift = 0;      // 色のずれ (処理の解像度での px)。R を左、B を右から読む
 };
 
 // ガビガビ度 (0-100) を写す。0 は処理しない。
-// 崩れ方の感じ方は、低い範囲で鈍く高い範囲で急になりやすい。そこでガビガビ度を対数の曲線
-// t = log(1 + 9g/100) / log(10) で 0-1 に写し、低い範囲ほど変化を大きくする。g = 10 で t = 0.28、30 で 0.57、50 で 0.74。
-// GPU の負荷は、処理の解像度での画素の数と回数の積で決まるため、回数は解像度を下げる範囲で増やす。
-// - 品質: t = 0 の 90 から t = 0.5 の 5 へ下げ、以降は 5
-// - 倍率: t = 0.5 までは 1、以降は t = 1 の 10 へ上げる
-// - 解像度と回数: t < 0.6 で等倍・1 回、0.8 未満で 1/2・2 回、0.92 未満で 1/3・3 回、以降は 1/4・4 回
+// ガビガビ度を対数の曲線 t = log(1 + 9g/100) / log(10) で 0-1 に写し、低い範囲ほど変化を大きくする。
+// g = 10 で t = 0.28、30 で 0.57、50 で 0.74。各要素の強さは t で決める。
+// - 量子化の倍率: t = 0 の 20% から t = 1 の 4,000% へ等比で上げる。JPEG の品質の換算式は品質 15 付近から倍率が
+//   急に上がり、崩れ方が急に変わって見えるため、品質を経由せずに倍率を直接決める。100% が JPEG の品質 50 に当たる
+// - 解像度: t < 0.4 で等倍、0.65 未満で 1/2、0.85 未満で 1/3、以降は 1/4
+// - 彩度: 1 から 2 倍、コントラスト: 1 から 1.5 倍、シャープ: 0 から 2
+// - 色のずれ: t < 0.4 で 0、0.7 未満で 1 px、0.9 未満で 2 px、以降は 3 px
 inline Settings settings_for(int crunch)
 {
 	crunch = std::clamp(crunch, kMinCrunch, kMaxCrunch);
@@ -67,21 +61,21 @@ inline Settings settings_for(int crunch)
 	}
 	const double t = std::log(1.0 + 9.0 * crunch / 100.0) / std::log(10.0);
 	Settings s;
-	s.quality = 90 - static_cast<int>(std::lround(85.0 * std::min(t / 0.5, 1.0)));
-	s.multiplier = static_cast<float>(1.0 + 9.0 * std::max((t - 0.5) / 0.5, 0.0));
-	s.scale = t < 0.6 ? 1 : (t < 0.8 ? 2 : (t < 0.92 ? 3 : 4));
-	s.passes = s.scale;
+	s.quant_scale = static_cast<float>(20.0 * std::pow(200.0, t));
+	s.scale = t < 0.4 ? 1 : (t < 0.65 ? 2 : (t < 0.85 ? 3 : 4));
+	s.saturation = static_cast<float>(1.0 + t);
+	s.contrast = static_cast<float>(1.0 + 0.5 * t);
+	s.sharpen = static_cast<float>(2.0 * t);
+	s.color_shift = t < 0.4 ? 0 : (t < 0.7 ? 1 : (t < 0.9 ? 2 : 3));
 	return s;
 }
 
-// libjpeg の jpeg_quality_scaling と同じ式で、表を品質に合わせて拡大縮小し、倍率を掛ける
-inline std::array<float, 64> scaled_table(const std::array<int, 64> &base, int quality, float multiplier)
+// JPEG の標準の表に倍率 (%) を掛ける。JPEG の上限 255 は超えてよい。最小は 1
+inline std::array<float, 64> scaled_table(const std::array<int, 64> &base, float quant_scale)
 {
-	quality = std::clamp(quality, 1, 100);
-	const int scale = quality < 50 ? 5000 / quality : 200 - quality * 2;
 	std::array<float, 64> table{};
 	for (size_t i = 0; i < base.size(); ++i) {
-		table[i] = static_cast<float>(std::clamp((base[i] * scale + 50) / 100, 1, 255)) * multiplier;
+		table[i] = std::max(1.0f, std::floor(static_cast<float>(base[i]) * quant_scale / 100.0f + 0.5f));
 	}
 	return table;
 }
@@ -107,10 +101,10 @@ inline std::array<float, 64> dct_basis()
 	return basis;
 }
 
-// DCT の中間のテクスチャの大きさ。ずらした格子の端のブロックの係数も置けるよう、余白を足して 8 の倍数に切り上げる
+// DCT の中間のテクスチャの大きさ。端にかかるブロックの係数も置けるよう、8 の倍数に切り上げる
 inline int padded_size(int size)
 {
-	return (size + kMaxShift + 7) / 8 * 8;
+	return (size + 7) / 8 * 8;
 }
 
 } // namespace jpeg_crunch
