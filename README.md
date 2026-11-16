@@ -126,11 +126,13 @@ gh attestation verify simple-jpeg-crunch-1.0.0-windows-x64.zip --repo AllegroMol
 
 ## Known Behavior / 既知の挙動
 
+- ソースに付けると、そのソースの不透明な部分だけが劣化します。透明な部分と、奥にあるほかのソースは元のままです。シーンやグループに付けると、中の項目を重ねた後の絵全体にかかり、奥のソースも劣化します。
 - HDR の映像 (Rec. 709 の拡張の色空間) では、OBS Studio の標準のシャープフィルターと同じく、劣化をかけずにそのまま通します。
 - 色差は 2×2 の画素で同じ値を使って元の解像度に戻します。そのため、色の境界がブロック状ににじみます。
 - 半透明の画素は、色をアルファで割り戻してから劣化させます。アルファは元のまま残します。
 - ガビガビ度を上げるほど GPU の負荷が増えます。重いときはガビガビ度を下げてください。
 
+- On a source, only its opaque parts are damaged. Transparent parts and other sources behind it stay unchanged. On a scene or group, the filter applies to the whole picture after its items are composited, so sources behind are damaged too.
 - HDR images (extended Rec. 709 color space) pass through unchanged, as with the built-in Sharpen filter of OBS Studio.
 - Chroma is restored by repeating each value over 2×2 pixels, so color edges bleed in blocks.
 - Translucent pixels are damaged after their color is divided by alpha. Alpha itself is kept unchanged.

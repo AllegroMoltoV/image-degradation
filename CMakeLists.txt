@@ -96,6 +96,7 @@ if(WIN32)
     odd-size
     srgb16f
     extended
+    scene
     settings-update
   )
   foreach(_backend IN ITEMS d3d11 opengl)
